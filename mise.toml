@@ -1,0 +1,6 @@
+[tools]
+"github:rojo-rbx/rojo" = "7.7.1"
+"github:lune-org/lune" = "0.11.1"
+"github:JohnnyMorganz/luau-lsp" = "1.70.1"
+"github:Kampfkarren/selene" = "0.32.0"
+stylua = "2.6.0"

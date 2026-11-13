@@ -1,0 +1,5 @@
+build/
+sourcemap.json
+globalTypes.d.luau
+roblox.yml
+*.rbxl.lock
