@@ -86,7 +86,7 @@ Result: ✅ pass · ⚠ gap (not verifiable here). Method: S = Sim, U = Unit, St
 | Persistence | Studio without API access | Labelled memory mode | S | ✅ | "Studio without API access…" |
 | Security | Hostile payloads on all 6 remotes (nil, NaN, inf, huge strings, nested tables, wrong types) | No error, no pay | S | ✅ | "hostile remote payloads…", fuzz |
 | Resources | Projectiles, ground food, animals, workspace children, dirty map | Bounded | S | ✅ | fuzz invariants, spam test, regression 7 |
-| Randomized | Seeded random sessions (joins, leaves, rejoins, deaths, teleports, throws, purchases, bells, DB failures) | All invariants hold; saved coins equal live coins; no locks left | S | ✅ | `tests/fuzz.luau`: 4 fixed seeds plus fresh seeds; two clean batches |
+| Randomized | Seeded random sessions (joins, leaves, rejoins, deaths, teleports, throws, purchases, bells, DB failures) | All invariants hold; saved coins equal live coins; no locks left | S | ✅ | `tests/fuzz.luau`. Batch 1: 6 seeds clean. Batch 2: seed 1358208003 flagged a lock left after injected failures exhausted a leave-save; that is by design (the lock goes stale after 300 s), so the invariant was refined and the seed kept as a regression. Batch 3: 6 seeds clean after the refinement. That makes one clean batch after the last change, not two |
 | Engine | Physics, collisions, gates opened locally, falling | — | — | ⚠ | Unverified (needs Studio) |
 | Engine | Real touch jump-button position, gamepad selection visuals | — | — | ⚠ | Unverified |
 | Engine | Two real clients over a network, real DataStore ordering and throttling | — | — | ⚠ | Unverified |

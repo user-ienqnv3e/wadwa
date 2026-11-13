@@ -66,7 +66,7 @@ See [`docs/QA.md`](docs/QA.md) for the QA matrix, the 20 defects fixed in the la
 **Performed (offline, outside Roblox Studio):**
 - `luau-lsp analyze` in `--!strict` against the Roblox API definitions: 0 errors. selene `src`: 0 errors. StyLua check passes.
 - 34 unit tests, 45 server integration scenarios and 21 client scenarios pass.
-- Two batches of seeded randomized sessions pass. Each seed runs joins, leaves, rejoins, deaths, teleports, throws, purchases, bells, DataStore failures and hostile payloads, with invariants checked every step and saves checked at shutdown.
+- Seeded randomized sessions pass. The last batch (6 seeds × 200 steps) was clean after one invariant refinement, described in docs/QA.md. Each seed runs joins, leaves, rejoins, deaths, teleports, throws, purchases, bells, DataStore failures and hostile payloads, with invariants checked every step and saves checked at shutdown.
 - `WildFeastIslands.rbxl` is rebuilt reproducibly (byte-identical across rebuilds) and reopened with Lune. The checks confirm:
   - the binary `<roblox!` header
   - all 26 scripts match their repository sources

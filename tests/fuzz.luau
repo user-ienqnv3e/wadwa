@@ -16,7 +16,8 @@ local EXTRA = tonumber(process.args[2]) or 2
 local STEPS = tonumber(process.args[3]) or 250
 
 -- Seeds that once found a defect (kept as permanent regressions) plus fixed coverage seeds.
-local REGRESSION_SEEDS = { 1, 2, 42, 20261113 }
+-- 1358208003: a leave-save exhausted its retries during an injected outage (invariant refined).
+local REGRESSION_SEEDS = { 1, 2, 42, 20261113, 1358208003 }
 
 local function lcg(seed)
 	local state = (math.floor(seed) % 2147483646) + 1
@@ -335,7 +336,19 @@ local function runSeed(seed)
 	for userId in pairs(everJoined) do
 		local record = backend.data["WildFeastIslands_Profiles_v1/player_" .. userId]
 		if record and record.lock then
-			error(string.format("seed %d: user %d still locked after shutdown", seed, userId))
+			-- Allowed only when a save for this user provably exhausted its retries (injected
+			-- outage): by design the last good save is kept and the lock goes stale after
+			-- SessionLockTimeout. Anything else is a leaked lock.
+			local exhausted = string.format("Save attempt %d failed for player_%d", Config.Data.SaveRetries, userId)
+			local allowed = false
+			for _, w in ipairs(engine.warnings) do
+				if string.find(w, exhausted, 1, true) then
+					allowed = true
+				end
+			end
+			if not allowed then
+				error(string.format("seed %d: user %d still locked after shutdown", seed, userId))
+			end
 		end
 	end
 	return completedFeasts
