@@ -535,6 +535,42 @@ for _, vp in ipairs({ Vector2.new(667, 375), Vector2.new(844, 390), Vector2.new(
 	end)
 end
 
+print("Expansion tabs")
+test("Kitchen, Quests and Decor tabs render, page, filter and send server-validated actions", function()
+	local engine, player, client = session()
+	local profile = richProfile(engine, player)
+	profile.stats.totalFeeds = 12
+	pushState(engine, player)
+	local Hud = client:controller("Hud")
+	for _, tab in ipairs({ "Kitchen", "Quests", "Decor" }) do
+		Hud.openPanel(tab)
+		engine:advance(0.3)
+		local _, content = panelContent(client)
+		truthy(content and string.find(textOf(content), "Page 1/", 1, true), tab .. " paged")
+		client:click(client:find("NextPage_" .. tab))
+		engine:advance(0.3)
+		truthy(string.find(textOf(content), "Page 2/", 1, true), tab .. " next page")
+		client:click(client:find("Filter_" .. tab))
+		engine:advance(0.3)
+		truthy(not string.find(textOf(content), "Filter: All", 1, true), tab .. " filtered")
+	end
+	Hud.openPanel("Quests")
+	engine:advance(0.3)
+	for _ = 1, 6 do -- filter -> Milestones
+		client:click(client:find("Filter_Quests"))
+		engine:advance(0.2)
+	end
+	client:click(client:find("NextPage_Quests"))
+	engine:advance(0.3)
+	local claim = client:find("Claim_feeds_1")
+	truthy(claim, "ready quest offers a claim button")
+	client:click(claim)
+	client:click(claim)
+	engine:advance(0.6)
+	eq(serverProfile(engine, player).questsClaimed.feeds_1, true, "claimed through the UI")
+	noFailures(engine)
+end)
+
 print(string.format("\n%d passed, %d failed", passed, failed))
 if failed > 0 then
 	process.exit(1)

@@ -60,9 +60,19 @@ local throwTouch: InputObject? = nil -- the touch currently holding the THROW bu
 local hudKey = "" -- fingerprint of what the HUD last rendered (skip identical rebuilds)
 local panelKey = ""
 
-local TABS = { "Pantry", "Upgrades", "Map", "Journal", "Settings" }
+local TABS = { "Pantry", "Upgrades", "Map", "Journal", "Settings" } -- side-menu buttons
+local PANEL_TABS = { "Pantry", "Kitchen", "Quests", "Decor", "Upgrades", "Map", "Journal", "Settings" }
 local TAB_KEYS = { Pantry = "P", Upgrades = "U", Map = "M", Journal = "J", Settings = "O" }
-local TAB_ICONS = { Pantry = "🍓", Upgrades = "⬆", Map = "🗺", Journal = "📖", Settings = "⚙" }
+local TAB_ICONS = {
+	Pantry = "🍓",
+	Kitchen = "🍳",
+	Quests = "📜",
+	Decor = "🏡",
+	Upgrades = "⬆",
+	Map = "🗺",
+	Journal = "📖",
+	Settings = "⚙",
+}
 
 -- Purchases waiting for the server's answer. A second tap on the same button before the next
 -- state push is ignored (the server also drops stale `expect` values), so nothing is bought twice.
@@ -295,7 +305,177 @@ local function purchase(buttonName: string, kind: string, id: string, expect: nu
 	send(kind, { id = id, expect = expect })
 end
 
+local rebuildPanelRef: (boolean?) -> ()
 local BUILDERS: { [string]: (any) -> () } = {}
+
+-- Paged, filterable lists for the expansion tabs (8 rows per page, one category filter).
+local PAGE_SIZE = 8
+local listPage: { [string]: number } = {}
+local listFilter: { [string]: number } = {}
+local function pagedList(tab: string, ids: { string }, filters: { string }, categoryOf: (string) -> string, render: (Frame, string) -> ())
+	local filterIndex = listFilter[tab] or 0
+	local filter = filters[filterIndex]
+	local shown = {}
+	for _, id in ipairs(ids) do
+		if not filter or categoryOf(id) == filter then
+			table.insert(shown, id)
+		end
+	end
+	local pages = math.max(1, math.ceil(#shown / PAGE_SIZE))
+	local page = math.clamp(listPage[tab] or 1, 1, pages)
+	listPage[tab] = page
+	local bar = row(1)
+	actionButton(bar, "Filter_" .. tab, "Filter: " .. (filter or "All") .. "  (tap to change)", true, 1, function()
+		listFilter[tab] = (filterIndex + 1) % (#filters + 1)
+		listPage[tab] = 1
+		rebuildPanelRef(true)
+	end)
+	actionButton(bar, "PrevPage_" .. tab, string.format("◀ Page %d/%d", page, pages), page > 1, 2, function()
+		listPage[tab] = page - 1
+		rebuildPanelRef(true)
+	end)
+	actionButton(bar, "NextPage_" .. tab, "Next page ▶", page < pages, 3, function()
+		listPage[tab] = page + 1
+		rebuildPanelRef(true)
+	end)
+	for i = (page - 1) * PAGE_SIZE + 1, math.min(#shown, page * PAGE_SIZE) do
+		render(row(i + 1), shown[i])
+	end
+end
+
+local function title(r: Frame, text: string, detail: string)
+	Ui.label({ Text = text, FontFace = Ui.TitleFont, TextSize = 20, LayoutOrder = 1, Parent = r })
+	Ui.label({ Text = detail, TextSize = 16, TextColor3 = C.Muted, LayoutOrder = 2, Parent = r })
+end
+
+BUILDERS.Kitchen = function(profile)
+	header(0, "Kitchen — cook meals, lures and crafts from your basket")
+	pagedList("Kitchen", Config.RecipeOrder, Config.StationOrder, function(id)
+		return Config.Recipes[id].Station
+	end, function(r, id)
+		local recipe = Config.Recipes[id]
+		local parts = {}
+		for foodId, count in pairs(recipe.Inputs) do
+			local food = Config.Foods[foodId]
+			table.insert(
+				parts,
+				string.format("%s %s %d/%d", food.Icon, food.Name, math.min(Economy.foodCount(Config, profile, foodId), 999), count)
+			)
+		end
+		table.sort(parts)
+		title(r, string.format("%s — %s · cooked %d", recipe.Name, recipe.Station, profile.cooked[id] or 0), table.concat(parts, "   "))
+		local known, reason = Economy.recipeKnown(Config, profile, id)
+		local ready = known and Economy.hasIngredients(Config, profile, id)
+		actionButton(
+			r,
+			"Cook_" .. id,
+			if known then (if ready then "Cook" else "Cook (missing ingredients)") else "🔒 " .. reason,
+			ready == true,
+			3,
+			function()
+				purchase("Cook_" .. id, "Cook", id, profile.cooked[id] or 0)
+			end
+		)
+		local lure = recipe.Output.Lure
+		if lure and (profile.lures[lure] or 0) > 0 then
+			actionButton(
+				r,
+				"Lure_" .. lure,
+				string.format(
+					"Call a %s (%d lure%s)",
+					Config.Species[lure].Name,
+					profile.lures[lure],
+					if profile.lures[lure] == 1 then "" else "s"
+				),
+				true,
+				4,
+				function()
+					send("UseLure", { id = lure })
+				end
+			)
+		end
+	end)
+end
+
+BUILDERS.Quests = function(profile)
+	header(0, string.format("Quests — %d ready to claim", Economy.claimableQuestCount(Config, profile)))
+	pagedList("Quests", Config.QuestOrder, Config.QuestGroupOrder, function(id)
+		return Config.Quests[id].Group
+	end, function(r, id)
+		local quest = Config.Quests[id]
+		local state = Economy.questState(Config, profile, id)
+		local progress, target = Economy.questProgress(Config, profile, id)
+		local coins, research = Economy.questReward(Config, profile, id)
+		local mark = if state == "claimed" then "✓ " elseif state == "ready" then "★ " elseif state == "locked" then "🔒 " else ""
+		title(
+			r,
+			mark .. quest.Name,
+			string.format("%s  (%d/%d) · reward %d coins, %d research", quest.Description, progress, target, coins, research)
+		)
+		if state == "ready" then
+			actionButton(r, "Claim_" .. id, "Claim reward", true, 3, function()
+				purchase("Claim_" .. id, "ClaimQuest", id, 0)
+			end)
+		end
+	end)
+end
+
+BUILDERS.Decor = function(profile)
+	header(0, string.format("Decor — %d plots per island; placed pieces add comfort", Economy.plots(Config, profile)))
+	pagedList("Decor", Config.DecorationOrder, Config.HabitatOrder, function(id)
+		return Config.Decorations[id].Habitat
+	end, function(r, id)
+		local deco = Config.Decorations[id]
+		local owned = profile.decorOwned[id] or 0
+		local placed = Economy.placedCount(profile, id)
+		title(
+			r,
+			string.format("%s — owned %d, placed %d", deco.Name, owned, placed),
+			string.format(
+				"%s Comfort %d · favoured by %s · %s",
+				deco.Description,
+				deco.Comfort,
+				Config.Species[deco.Favored].Name,
+				Config.Habitats[deco.Habitat].Name
+			)
+		)
+		if deco.Source == "shop" and owned < Config.Decor.MaxOwnedEach then
+			local affordable = profile.unlockedHabitats[deco.Habitat] and Economy.canAfford(profile, deco.Cost)
+			actionButton(r, "BuyDecor_" .. id, "Buy — " .. costString(deco.Cost), affordable == true, 3, function()
+				purchase("BuyDecor_" .. id, "BuyDecor", id, owned)
+			end)
+		end
+		if placed < owned then
+			local slots = profile.decorPlaced[deco.Habitat] or {}
+			local free = nil
+			for slot = 1, Economy.plots(Config, profile) do
+				if not slots[Economy.slotKey(slot)] then
+					free = slot
+					break
+				end
+			end
+			actionButton(
+				r,
+				"Place_" .. id,
+				if free then "Place on plot " .. free else "No free plot (remove one)",
+				free ~= nil,
+				4,
+				function()
+					send("PlaceDecor", { id = id, habitat = deco.Habitat, slot = free })
+				end
+			)
+		elseif placed > 0 then
+			actionButton(r, "Remove_" .. id, "Return one to storage", true, 4, function()
+				for slot = 1, Economy.plots(Config, profile) do
+					if (profile.decorPlaced[deco.Habitat] or {})[Economy.slotKey(slot)] == id then
+						send("RemoveDecor", { habitat = deco.Habitat, slot = slot })
+						return
+					end
+				end
+			end)
+		end
+	end)
+end
 
 BUILDERS.Pantry = function(profile)
 	header(0, "Pantry — prepare food for your throws")
@@ -600,6 +780,9 @@ BUILDERS.Settings = function(profile)
 	})
 end
 
+rebuildPanelRef = function(force: boolean?)
+	local _ = force
+end
 local function rebuildPanel(force: boolean?)
 	if not panel.Visible or not Store.profile then
 		return
@@ -630,6 +813,8 @@ local function rebuildPanel(force: boolean?)
 		end
 	end
 end
+
+rebuildPanelRef = rebuildPanel
 
 function Hud.openPanel(tab: string)
 	currentTab = tab
@@ -1107,7 +1292,7 @@ function Hud.init()
 	}, {
 		Ui.list(Enum.FillDirection.Horizontal, 6),
 	})
-	for i, tab in ipairs(TABS) do
+	for i, tab in ipairs(PANEL_TABS) do
 		local button =
 			Ui.button({ Name = "Tab_" .. tab, Size = UDim2.fromOffset(136, 52), Text = tab, TextSize = 18, LayoutOrder = i, Parent = tabs })
 		button.Activated:Connect(function()
@@ -1159,6 +1344,9 @@ function Hud.init()
 		[Enum.KeyCode.M] = "Map",
 		[Enum.KeyCode.J] = "Journal",
 		[Enum.KeyCode.O] = "Settings",
+		[Enum.KeyCode.K] = "Kitchen",
+		[Enum.KeyCode.L] = "Quests",
+		[Enum.KeyCode.H] = "Decor",
 	}
 	UserInputService.InputBegan:Connect(function(input, processed)
 		if input.KeyCode == Enum.KeyCode.ButtonY then
