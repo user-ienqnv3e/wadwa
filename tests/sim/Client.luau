@@ -128,6 +128,8 @@ function Engine:attachClient(player, options)
 		InputEnded = Signal.new(self),
 		InputChanged = Signal.new(self),
 		TouchEnded = Signal.new(self),
+		WindowFocusReleased = Signal.new(self),
+		WindowFocused = Signal.new(self),
 		LastInputTypeChanged = Signal.new(self),
 		TouchEnabled = mode == "touch",
 		KeyboardEnabled = mode ~= "touch",
@@ -158,7 +160,7 @@ function Engine:attachClient(player, options)
 	end
 	client.cas = cas
 
-	local guiService = { SelectedObject = nil }
+	local guiService = { SelectedObject = nil, MenuOpened = Signal.new(self), MenuClosed = Signal.new(self) }
 	local promptService = { PromptTriggered = Signal.new(self) }
 	client.promptService = promptService
 	local debris = {}

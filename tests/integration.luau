@@ -728,6 +728,426 @@ test("feeding a locked island's animal (thrown across water) pays nothing", func
 	eq(profile.stats.totalFeeds, 0, "no feeds")
 end)
 
+--------------------------------------------------------------------------------
+print("Regressions: persistence edge cases")
+local KEY = "WildFeastIslands_Profiles_v1/player_"
+
+test("a load whose UpdateAsync transform is re-run after a conflict never claims a lock it lost", function()
+	local backend = Engine.newBackend()
+	local engine = boot({ backend = backend })
+	-- Between our first transform run and the commit, another live server locks the profile.
+	backend.conflict["player_150"] = function(stored)
+		return { profile = { schemaVersion = 2, coins = 321 }, lock = { jobId = "other-server", time = 1.7e9 + engine.now } }
+	end
+	local player = engine:addPlayer(150)
+	engine:advance(40)
+	truthy(backend.transformRuns >= 2, "transform was re-run")
+	eq(player:GetAttribute("PersistenceMode"), "Unsaved", "must not believe it owns the lock")
+	profileOf(engine, player).coins = 1
+	engine:removePlayer(player)
+	engine:advance(5)
+	local record = backend.data[KEY .. "150"]
+	eq(record.profile.coins, 321, "other server's data untouched")
+	eq(record.lock.jobId, "other-server", "other server's lock untouched")
+	noFailures(engine)
+end)
+
+test("a save whose transform is re-run keeps the final outcome (no stale lost-lock flag)", function()
+	local backend = Engine.newBackend()
+	local engine = boot({ backend = backend })
+	local player = join(engine, 151)
+	profileOf(engine, player).coins = 40
+	-- First run sees a foreign lock (an admin tool briefly touched the key), the final run sees ours again.
+	backend.conflict["player_151"] = function(stored)
+		return stored
+	end
+	local stored = backend.data[KEY .. "151"]
+	stored.lock = { jobId = "someone-else", time = 1.7e9 + engine.now }
+	local ourLock = { jobId = engine.jobId, time = 1.7e9 + engine.now }
+	backend.conflict["player_151"] = function(s)
+		s.lock = ourLock
+		return s
+	end
+	engine:spawn(engine:service("DataService").save, player, false)
+	engine:advance(1)
+	eq(engine:service("DataService").getSession(player).mode, "DataStore", "still saving")
+	eq(backend.data[KEY .. "151"].profile.coins, 40, "saved")
+	noFailures(engine)
+end)
+
+test("a corrupt (non-table) stored record is never overwritten", function()
+	local backend = Engine.newBackend()
+	backend.data[KEY .. "152"] = "garbage-from-an-old-tool"
+	local engine = boot({ backend = backend })
+	local player = join(engine, 152)
+	engine:advance(2)
+	eq(player:GetAttribute("PersistenceMode"), "Unsaved", "unsaved")
+	profileOf(engine, player).coins = 5
+	engine:removePlayer(player)
+	engine:advance(5)
+	eq(backend.data[KEY .. "152"], "garbage-from-an-old-tool", "left as it was")
+	noFailures(engine)
+end)
+
+test("corrupt fields inside a valid record are sanitised, not fatal", function()
+	local backend = Engine.newBackend()
+	backend.data[KEY .. "153"] = {
+		profile = {
+			schemaVersion = 2,
+			coins = "12", -- DataStores cannot hold NaN/inf, so corruption shows up as wrong types/ranges
+			research = -5,
+			inventory = { clover_bun = 1e99, nope = 3 },
+			unlockedFoods = { clover_bun = true, hacked = true },
+			upgrades = { strong_arm = 999 },
+			trust = "lots",
+			selectedFood = string.rep("x", 5000),
+			stats = { totalFeeds = -3, coinsEarned = 1e300 },
+		},
+	}
+	local engine = boot({ backend = backend })
+	local player = join(engine, 153)
+	local profile = profileOf(engine, player)
+	eq(player:GetAttribute("PersistenceMode"), "DataStore", "loaded")
+	eq(profile.coins, 0, "string coins -> 0")
+	eq(profile.stats.totalFeeds, 0, "negative counter -> 0")
+	eq(profile.stats.coinsEarned, engine.config.Caps.Counter, "huge counter capped")
+	eq(profile.research, 0, "negative research -> 0")
+	eq(profile.inventory.clover_bun, engine.config.Caps.FoodStack, "stack capped")
+	eq(profile.inventory.nope, nil, "unknown food dropped")
+	eq(profile.upgrades.strong_arm, #engine.config.Upgrades.strong_arm.Levels, "level capped")
+	eq(profile.selectedFood, "sunberry", "bad selection reset")
+	noFailures(engine)
+end)
+
+test("leaving mid-load then rejoining at once still gets a saving session", function()
+	local backend = Engine.newBackend()
+	local engine = boot({ backend = backend })
+	-- Call latencies: first load 1 s, the lock-only release 3 s (slow), the rejoin's load 0.5 s,
+	-- so without care the rejoin would commit first and then lose its lock to the late release.
+	backend.latencies = { 1, 3, 0.5 }
+	local player = engine:addPlayer(154)
+	engine:advance(0.5) -- load in flight
+	engine:removePlayer(player)
+	engine:advance(0.7) -- load landed after the leave; the lock-only release is in flight
+	local again = engine:addPlayer(154)
+	engine:advance(10)
+	eq(again:GetAttribute("PersistenceMode"), "DataStore", "rejoined session saves")
+	profileOf(engine, again).coins = 12
+	engine:spawn(engine:service("DataService").save, again, false)
+	engine:advance(3)
+	eq(engine:service("DataService").getSession(again).mode, "DataStore", "lock still ours after the save")
+	eq(backend.data[KEY .. "154"].profile.coins, 12, "saved")
+	noFailures(engine)
+end)
+
+test("a load still in flight at shutdown releases its lock", function()
+	local backend = Engine.newBackend()
+	backend.latency = 1
+	local engine = boot({ backend = backend })
+	engine:addPlayer(155)
+	engine:advance(0.7) -- the load has committed its lock; the reply is still on its way
+	truthy(backend.data[KEY .. "155"].lock, "lock written")
+	engine:shutdown()
+	local record = backend.data[KEY .. "155"]
+	eq(record and record.lock, nil, "no lock left behind for 5 minutes")
+	noFailures(engine)
+end)
+
+test("after PlayerRemoving no gameplay change can slip in behind the final snapshot", function()
+	local backend = Engine.newBackend()
+	backend.latency = 1
+	local engine = boot({ backend = backend })
+	local player = join(engine, 156)
+	engine:advance(2)
+	local profile = profileOf(engine, player)
+	profile.coins = 100
+	engine:removePlayer(player)
+	-- The final save is still in flight; a queued purchase must not be applied to a profile that
+	-- is no longer going to be saved.
+	engine:fireServer(player, "Action", { kind = "BuyUpgrade", id = "strong_arm", expect = 0 })
+	eq(engine:service("DataService").getProfile(player), nil, "no profile while closing")
+	engine:advance(5)
+	eq(backend.data[KEY .. "156"].profile.coins, 100, "saved exactly what was there at leave")
+	noFailures(engine)
+end)
+
+test("save retries exhausted on leave: stored data untouched, a later server takes over after the lock times out", function()
+	local backend = Engine.newBackend()
+	local engine = boot({ backend = backend })
+	local player = join(engine, 157)
+	profileOf(engine, player).coins = 30
+	engine:spawn(engine:service("DataService").save, player, false)
+	engine:advance(2)
+	profileOf(engine, player).coins = 31
+	backend.failNext = 100
+	engine:removePlayer(player)
+	engine:advance(20)
+	backend.failNext = 0
+	eq(backend.data[KEY .. "157"].profile.coins, 30, "last good save kept, not corrupted")
+	local second = Engine.new({ place = PLACE, backend = backend, jobId = "sim-job-2" })
+	second.now = engine.now + engine.config.Data.SessionLockTimeout + 5
+	second:startServer()
+	local p2 = second:addPlayer(157)
+	second:advance(3)
+	eq(p2:GetAttribute("PersistenceMode"), "DataStore", "stale lock taken over")
+	eq(second:service("DataService").getProfile(p2).coins, 30, "loads the last good save")
+	noFailures(engine)
+	noFailures(second)
+end)
+
+test("throttled writes are retried with backoff and never lose the session", function()
+	local backend = Engine.newBackend()
+	local engine = boot({ backend = backend })
+	local player = join(engine, 158)
+	backend.throttleWindow = 2
+	profileOf(engine, player).coins = 8
+	engine:spawn(engine:service("DataService").save, player, false) -- throttled right after the load write
+	engine:advance(10)
+	truthy(backend.throttled >= 1, "throttle simulated")
+	eq(backend.data[KEY .. "158"].profile.coins, 8, "saved after backoff")
+	eq(engine:service("DataService").getSession(player).mode, "DataStore", "still saving")
+	noFailures(engine)
+end)
+
+test("a session whose lock is taken over is told and switches to unsaved", function()
+	local backend = Engine.newBackend()
+	local engine = boot({ backend = backend })
+	local player = join(engine, 159)
+	backend.data[KEY .. "159"].lock = { jobId = "other-server", time = 1.7e9 + engine.now }
+	engine:spawn(engine:service("DataService").save, player, false)
+	engine:advance(2)
+	eq(player:GetAttribute("PersistenceMode"), "Unsaved", "attribute updated")
+	truthy(string.find(notifications(engine, player), "another server", 1, true), "player told")
+	eq(engine:lastState(player).persistence, "Unsaved", "HUD state pushed")
+	noFailures(engine)
+end)
+
+test("state pushes never keep references to players who left", function()
+	local engine = boot()
+	local player = join(engine, 160)
+	engine:removePlayer(player)
+	engine:advance(1)
+	engine:service("StateService").markDirty(player) -- e.g. a late projectile/feast callback
+	engine:advance(1)
+	eq(engine:service("StateService").pendingCount(), 0, "no dangling dirty entry")
+	noFailures(engine)
+end)
+
+--------------------------------------------------------------------------------
+print("Regressions: throwing exploits & feeding order")
+local function addWall(engine, cframe, size)
+	local world = engine.workspace:FindFirstChild(engine.config.World.FolderName)
+	local wall = roblox.Instance.new("Part")
+	wall.Name = "TestWall"
+	wall.Anchored = true
+	wall.Size = size
+	wall.CFrame = cframe
+	wall.Position = cframe.Position
+	wall.Parent = world
+	return wall
+end
+
+test("a reported origin on the far side of a wall is refused (no throwing through walls)", function()
+	local engine = boot()
+	local player = join(engine, 170)
+	local puff = animalById(engine, "puffhop_1")
+	local AnimalService = engine:service("AnimalService")
+	parkOthers(engine, puff)
+	puff.moveTarget, puff.nextWander = nil, math.huge
+	local mouth = AnimalService.mouthPosition(puff)
+	local standAt = Vector3.new(mouth.X, 9, mouth.Z + 12)
+	stand(engine, player, standAt, mouth)
+	engine:advance(0.2)
+	local head = headOf(player)
+	-- A tall thin wall 2 studs in front of the face; the client claims its head is 4 studs ahead.
+	addWall(engine, CFrame.new(head.X, head.Y, head.Z - 2), Vector3.new(30, 30, 0.6))
+	local fakeHead = head + Vector3.new(0, 0, -4)
+	local dir = (mouth - fakeHead).Unit
+	engine:fireServer(player, "Throw", "sunberry", dir, 0.3, fakeHead)
+	engine:advance(2)
+	noFailures(engine)
+	eq(profileOf(engine, player).stats.totalFeeds, 0, "fed through a wall")
+	local ended = lastFx(engine, player, "end")
+	truthy(ended and ended.kind == "bounce", "food stopped by the wall: " .. tostring(ended and ended.kind))
+end)
+
+test("an animal behind a thin wall cannot be hit within one long physics step", function()
+	local engine = boot()
+	local player = join(engine, 171)
+	local Config = engine.config
+	local puff = animalById(engine, "puffhop_1")
+	local AnimalService = engine:service("AnimalService")
+	parkOthers(engine, puff)
+	puff.moveTarget, puff.nextWander = nil, math.huge
+	puff.pos = puff.home
+	engine:advance(0.2)
+	local mouth = AnimalService.mouthPosition(puff)
+	stand(engine, player, Vector3.new(mouth.X, 9, mouth.Z + 30), mouth)
+	engine:advance(0.2)
+	local dt = 0.1
+	throwAt(engine, player, mouth, 0.6)
+	local launch = lastFx(engine, player, "throw")
+	truthy(launch, "thrown")
+	-- Find the first step segment that enters the catch radius and put a wall across it, between
+	-- its start and its closest point to the mouth, so wall and catch fall in the same step.
+	local Trajectory = engine:shared("Trajectory")
+	local radius = AnimalService.catchRadius(puff) + Config.Throw.ProjectileRadius
+	local a, closest
+	for k = 1, 60 do
+		local p0 = Trajectory.positionAt(launch.origin, launch.velocity, Config.Throw.Gravity, (k - 1) * dt)
+		local p1 = Trajectory.positionAt(launch.origin, launch.velocity, Config.Throw.Gravity, k * dt)
+		local d, t = Trajectory.closestOnSegment(p0, p1, mouth)
+		if d <= radius then
+			a, closest = p0, p0:Lerp(p1, t)
+			break
+		end
+	end
+	truthy(a, "arc reaches the mouth")
+	local wallAt = a:Lerp(closest, 0.5)
+	addWall(engine, CFrame.lookAt(wallAt, closest), Vector3.new(12, 12, 0.2))
+	engine:advance(2, dt)
+	noFailures(engine)
+	local reward = lastFx(engine, player, "reward")
+	local ended = lastFx(engine, player, "end")
+	eq(
+		profileOf(engine, player).stats.totalFeeds,
+		0,
+		string.format(
+			"hit registered through the wall (%s, end %s at %s, wall %s, mouth %s)",
+			tostring(reward and reward.quality),
+			tostring(ended and ended.kind),
+			tostring(ended and ended.pos),
+			tostring(wallAt),
+			tostring(mouth)
+		)
+	)
+end)
+
+test("the last stocked food switches the selection back to the free food", function()
+	local engine = boot()
+	local player = join(engine, 172)
+	local profile = profileOf(engine, player)
+	profile.unlockedFoods.clover_bun = true
+	profile.inventory.clover_bun = 1
+	profile.selectedFood = "clover_bun"
+	stand(engine, player, Vector3.new(0, 9, -100), Vector3.new(0, 9, -300))
+	engine:fireServer(player, "Throw", "clover_bun", Vector3.new(0, 0.3, -1).Unit, 0.5)
+	engine:advance(1)
+	eq(profile.inventory.clover_bun, nil, "used up")
+	eq(profile.selectedFood, "sunberry", "fell back to free food")
+	truthy(string.find(notifications(engine, player), "last Clover Bun", 1, true), "told")
+	noFailures(engine)
+end)
+
+test("a double-tapped upgrade, restoration or batch buys exactly once", function()
+	local engine = boot()
+	local player = join(engine, 173)
+	local profile = profileOf(engine, player)
+	profile.coins = 2000
+	profile.research = 50
+	profile.unlockedFoods.clover_bun = true
+	for _ = 1, 2 do
+		engine:fireServer(player, "Action", { kind = "BuyUpgrade", id = "strong_arm", expect = 0 })
+		engine:fireServer(player, "Action", { kind = "Restore", id = "meadow", expect = 0 })
+		engine:fireServer(player, "Action", { kind = "BuyFood", id = "clover_bun", expect = 0 })
+	end
+	engine:advance(0.5)
+	eq(profile.upgrades.strong_arm, 1, "one upgrade level")
+	eq(profile.restoration.meadow, 1, "one restoration step")
+	eq(profile.inventory.clover_bun, 5, "one batch")
+	-- No expectation at all is refused too (only the current client sends purchases).
+	engine:fireServer(player, "Action", { kind = "BuyUpgrade", id = "strong_arm" })
+	engine:advance(0.2)
+	eq(profile.upgrades.strong_arm, 1, "missing expect refused")
+	-- The next legitimate purchase still works.
+	engine:fireServer(player, "Action", { kind = "BuyUpgrade", id = "strong_arm", expect = 1 })
+	engine:advance(0.2)
+	eq(profile.upgrades.strong_arm, 2, "next level bought")
+	noFailures(engine)
+end)
+
+--------------------------------------------------------------------------------
+print("Regressions: feast scaling & simultaneous finals")
+test("players leaving mid-feast shrink the appetite so the one who stays can finish", function()
+	local engine = boot()
+	local a = join(engine, 180)
+	local b = join(engine, 181)
+	local c = join(engine, 182)
+	local Config = engine.config
+	local FeastService = engine:service("FeastService")
+	engine:advance(Config.Feast.FirstDelay + Config.Feast.AutoStartAfterReady + Config.Feast.ArriveSeconds + 2, 0.1)
+	eq(FeastService.state(), "Active", "active")
+	engine:removePlayer(b)
+	engine:removePlayer(c)
+	engine:advance(1.5)
+	local feast = engine:messages(a, "Feast")
+	eq(feast[#feast].goal, Config.Feast.BaseGoal, "goal back to the solo appetite")
+	local pier = Vector3.new(Config.Feast.PierEnd[1], 9, Config.Feast.PierEnd[2] - 5)
+	stand(engine, a, pier, FeastService.mouthPosition())
+	feedGiantUntil(engine, a, function()
+		return FeastService.state() ~= "Active"
+	end, 30)
+	eq(profileOf(engine, a).stats.feastsCompleted, 1, "solo finished after others left")
+	noFailures(engine)
+end)
+
+test("two final contributions in the same frame: one completion, one payout each, late food refunded", function()
+	local engine = boot()
+	local a = join(engine, 183)
+	local b = join(engine, 184)
+	local Config = engine.config
+	local FeastService = engine:service("FeastService")
+	engine:advance(Config.Feast.FirstDelay + Config.Feast.AutoStartAfterReady + Config.Feast.ArriveSeconds + 2, 0.1)
+	local pier = Vector3.new(Config.Feast.PierEnd[1], 9, Config.Feast.PierEnd[2] - 5)
+	stand(engine, a, pier, FeastService.mouthPosition())
+	stand(engine, b, pier, FeastService.mouthPosition())
+	-- Fill to one point short with a's throws.
+	local goal = engine:messages(a, "Feast")[#engine:messages(a, "Feast")].goal
+	for _ = 1, goal - 1 do
+		FeastService.contribute(a, "sunberry")
+	end
+	local pb = profileOf(engine, b)
+	pb.unlockedFoods.clover_bun = true
+	pb.inventory.clover_bun = 3
+	local mouth = FeastService.mouthPosition()
+	throwAt(engine, a, mouth, 0.5, "sunberry")
+	throwAt(engine, b, mouth, 0.5, "clover_bun")
+	engine:advance(3)
+	noFailures(engine)
+	eq(FeastService.state(), "Leaving", "completed once")
+	eq(profileOf(engine, a).stats.feastsCompleted, 1, "a paid once")
+	local bPaid = pb.stats.feastsCompleted
+	truthy(bPaid <= 1, "b never paid twice")
+	eq(pb.inventory.clover_bun, 3, "b's late food refunded, not lost")
+	engine:advance(Config.Feast.LeaveSeconds + 1)
+	eq(FeastService.state(), "Waiting", "reset")
+end)
+
+test("repeated feast cycles stay bounded and pay once per cycle", function()
+	local engine = boot()
+	local player = join(engine, 185)
+	local Config = engine.config
+	local FeastService = engine:service("FeastService")
+	local pier = Vector3.new(Config.Feast.PierEnd[1], 9, Config.Feast.PierEnd[2] - 5)
+	local cycles = 0
+	for _ = 1, 4 do
+		while FeastService.state() ~= "Active" do
+			engine:advance(1, 0.2)
+		end
+		stand(engine, player, pier, FeastService.mouthPosition())
+		feedGiantUntil(engine, player, function()
+			return FeastService.state() ~= "Active"
+		end, 40)
+		cycles += 1
+	end
+	engine:advance(Config.Feast.LeaveSeconds + 1)
+	local profile = profileOf(engine, player)
+	eq(profile.stats.feastsCompleted, cycles, "one completion per cycle")
+	eq(profile.stats.feastsJoined, cycles, "one join per cycle")
+	truthy(#engine.workspace.WildFeastGroundFood:GetChildren() <= Config.Caps.GroundFoodGlobal, "ground food bounded")
+	noFailures(engine)
+end)
+
 print(string.format("\n%d passed, %d failed", passed, failed))
 if failed > 0 then
 	process.exit(1)

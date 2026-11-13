@@ -76,18 +76,28 @@ local MIGRATIONS: { [number]: (any) -> any } = {
 	[1] = function(data: any): any
 		local discoveries = {}
 		if type(data.discoveries) == "table" then
-			for _, entry in ipairs(data.discoveries) do
-				if type(entry) == "string" then
+			for key, entry in pairs(data.discoveries) do
+				if type(key) == "number" and type(entry) == "string" then
 					local species, food = string.match(entry, "^([%w_]+):([%w_]+)$")
 					if species and food then
 						discoveries[species] = discoveries[species] or {}
 						discoveries[species][food] = true
 					end
+				elseif type(key) == "string" and type(entry) == "table" then
+					-- Already in the v2 shape (a save that lost its schemaVersion): keep it.
+					discoveries[key] = discoveries[key] or {}
+					for food, known in pairs(entry) do
+						if type(food) == "string" and known == true then
+							discoveries[key][food] = true
+						end
+					end
 				end
 			end
 		end
 		data.discoveries = discoveries
-		data.restoration = data.restoration or {}
+		if type(data.restoration) ~= "table" then
+			data.restoration = {}
+		end
 		data.schemaVersion = 2
 		return data
 	end,

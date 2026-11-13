@@ -5,6 +5,7 @@
 -- Sends only (foodId, unit direction, power); the server decides everything else.
 
 local Players = game:GetService("Players")
+local GuiService = game:GetService("GuiService")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -313,6 +314,11 @@ function ThrowController.init()
 	player.CharacterAdded:Connect(function()
 		ThrowController.cancel()
 	end)
+	-- A held button can be released while the window is unfocused (alt-tab, notification shade)
+	-- or the Roblox menu is open, and InputEnded never arrives: drop the hold instead of leaving
+	-- it charging forever or throwing on the next press.
+	UserInputService.WindowFocusReleased:Connect(ThrowController.cancel)
+	GuiService.MenuOpened:Connect(ThrowController.cancel)
 	RunService.RenderStepped:Connect(updatePreview)
 end
 

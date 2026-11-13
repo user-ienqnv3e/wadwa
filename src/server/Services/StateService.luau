@@ -19,6 +19,7 @@ local dirty: { [Player]: boolean } = {}
 local lastPush: { [Player]: number } = {}
 
 local function push(player: Player)
+	dirty[player] = nil
 	local session = DataService.getSession(player)
 	if not session then
 		return
@@ -33,16 +34,33 @@ local function push(player: Player)
 end
 
 function StateService.markDirty(player: Player)
+	-- Late callbacks (a landing projectile, a feast payout) may name a player who already left;
+	-- never keep a reference to them.
+	if player.Parent ~= Players or not DataService.getSession(player) then
+		return
+	end
 	dirty[player] = true
 end
 
 -- kind: "info" | "success" | "warn" | "error"
 function StateService.notify(player: Player, text: string, kind: string?)
+	if player.Parent ~= Players then
+		return
+	end
 	NotifyRemote:FireClient(player, { text = text, kind = kind or "info" })
 end
 
 function StateService.notifyAll(text: string, kind: string?)
 	NotifyRemote:FireAllClients({ text = text, kind = kind or "info" })
+end
+
+-- Players with a state push queued (diagnostics; stays bounded by the players in the server).
+function StateService.pendingCount(): number
+	local n = 0
+	for _ in pairs(dirty) do
+		n += 1
+	end
+	return n
 end
 
 function StateService.init()
@@ -62,6 +80,14 @@ function StateService.init()
 		elseif session.mode == "StudioMemory" then
 			StateService.notify(player, "Studio test mode: progress is kept in memory only.", "warn")
 		end
+	end)
+	DataService.onModeChanged(function(player)
+		StateService.markDirty(player)
+		StateService.notify(
+			player,
+			"Your progress is now open on another server, so this visit will stop saving. Rejoin to continue safely.",
+			"warn"
+		)
 	end)
 	Players.PlayerRemoving:Connect(function(player)
 		dirty[player] = nil

@@ -277,11 +277,35 @@ local function onThrow(player: Player, foodId: any, direction: any, power: any, 
 	if profile.selectedFood ~= request.foodId then
 		profile.selectedFood = request.foodId
 	end
+	if not Economy.hasFood(Config, profile, request.foodId) then
+		-- That was the last one: switch back to the free food so the next throw just works.
+		local fallback = Economy.freeFood(Config)
+		profile.selectedFood = fallback
+		deps.notify(
+			player,
+			string.format(
+				"That was your last %s. Switched to free %s (prepare more in the Pantry).",
+				Config.Foods[request.foodId].Name,
+				Config.Foods[fallback].Name
+			),
+			"info"
+		)
+	end
 	lastThrow[player] = now
 	deps.markDirty(player)
 
+	-- The client-reported head is only trusted if nothing solid lies between it and the server's
+	-- head, and the food never appears on the far side of a wall the thrower is facing.
 	local launchHead = Validation.pickOrigin(reportedOrigin, head, Config.Throw.MaxOriginDrift)
+	if launchHead ~= head and workspace:Raycast(head, launchHead - head, raycastParams) then
+		reject("origin_blocked")
+		launchHead = head
+	end
 	local origin = launchHead + request.direction * Config.Throw.SpawnForwardOffset
+	local blocker = workspace:Raycast(launchHead, origin - launchHead, raycastParams)
+	if blocker then
+		origin = launchHead + (blocker.Position - launchHead) * 0.9
+	end
 	local velocity =
 		Trajectory.launchVelocity(request.direction, request.power, Config.Throw.MinSpeed, Economy.maxThrowSpeed(Config, profile))
 	nextId += 1
@@ -322,11 +346,32 @@ local function stepProjectiles(dt: number)
 		local b = Trajectory.positionAt(projectile.origin, projectile.velocity, gravity, projectile.t)
 		projectile.prev = b
 
+		-- World geometry is found first: nothing beyond the first solid surface on this step's
+		-- segment can be hit, so food never passes through walls, cliffs or bridges.
+		local hit = workspace:Raycast(a, b - a, raycastParams)
+		local reach = 1
+		if hit then
+			local length = (b - a).Magnitude
+			reach = if length > 1e-6 then math.clamp((hit.Position - a).Magnitude / length, 0, 1) else 0
+		end
+
 		-- 1) The feast giant (if it is accepting food).
-		if mouth and Trajectory.distanceToSegment(a, b, mouth) <= Config.Feast.MouthRadius then
-			deps.feast.contribute(projectile.owner, projectile.foodId)
-			endProjectile(i, "feast", mouth)
-			continue
+		if mouth then
+			local mouthDist, mouthT = Trajectory.closestOnSegment(a, b, mouth)
+			if mouthDist <= Config.Feast.MouthRadius and mouthT <= reach + 1e-3 then
+				if deps.feast.contribute(projectile.owner, projectile.foodId) then
+					endProjectile(i, "feast", mouth)
+				else
+					-- The feast filled up earlier this frame: give the food back rather than lose it.
+					local ownerProfile = deps.getProfile(projectile.owner)
+					if ownerProfile then
+						Economy.refundFood(Config, ownerProfile, projectile.foodId)
+						deps.markDirty(projectile.owner)
+					end
+					endProjectile(i, "vanish", mouth)
+				end
+				continue
+			end
 		end
 
 		-- 2) Animals: a mouth catch is "Perfect", touching the body is "Good".
@@ -337,11 +382,19 @@ local function stepProjectiles(dt: number)
 			if AnimalService.isReceptive(animal) and animal.root.Parent then
 				local body = AnimalService.bodyPosition(animal)
 				if (body - b).Magnitude < 25 then
-					local mouthDist = Trajectory.distanceToSegment(a, b, AnimalService.mouthPosition(animal))
-					local bodyDist = Trajectory.distanceToSegment(a, b, body)
-					if mouthDist <= AnimalService.catchRadius(animal) + Config.Throw.ProjectileRadius and mouthDist < bestDist then
+					local mouthDist, mouthT = Trajectory.closestOnSegment(a, b, AnimalService.mouthPosition(animal))
+					local bodyDist, bodyT = Trajectory.closestOnSegment(a, b, body)
+					if
+						mouthT <= reach + 1e-3
+						and mouthDist <= AnimalService.catchRadius(animal) + Config.Throw.ProjectileRadius
+						and mouthDist < bestDist
+					then
 						best, bestQuality, bestDist = animal, "Perfect", mouthDist
-					elseif bodyDist <= animal.species.BodyRadius + Config.Throw.ProjectileRadius and bodyDist < bestDist then
+					elseif
+						bodyT <= reach + 1e-3
+						and bodyDist <= animal.species.BodyRadius + Config.Throw.ProjectileRadius
+						and bodyDist < bestDist
+					then
 						best, bestQuality, bestDist = animal, "Good", bodyDist
 					end
 				end
@@ -354,7 +407,6 @@ local function stepProjectiles(dt: number)
 		end
 
 		-- 3) World geometry: land and become ground food if it is on an island.
-		local hit = workspace:Raycast(a, b - a, raycastParams)
 		if hit then
 			local landed = hit.Position
 			if hit.Normal.Y > 0.5 and habitatAt(landed) then

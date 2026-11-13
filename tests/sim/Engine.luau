@@ -344,7 +344,25 @@ end
 local Backend = {}
 Backend.__index = Backend
 function Engine.newBackend()
-	return setmetatable({ data = {}, failNext = 0, latency = 0.2, writes = 0, calls = 0, reads = 0 }, Backend)
+	-- conflict[key] = fn(storedCopy) -> newStored: on the next UpdateAsync of `key`, the transform
+	--   first runs against the old value, then another writer commits fn's result, and the
+	--   transform runs again on that (Roblox documents that the transform may be re-run).
+	-- throttleWindow: seconds within which a second write to the same key errors (worst-case model
+	--   of the per-key write limit; real Roblox usually queues instead of failing).
+	return setmetatable({
+		data = {},
+		failNext = 0,
+		latency = 0.2,
+		writes = 0,
+		calls = 0,
+		reads = 0,
+		transformRuns = 0,
+		conflict = {},
+		throttleWindow = 0,
+		lastWrite = {},
+		throttled = 0,
+		latencies = {}, -- optional per-call latencies, consumed in call order (then `latency`)
+	}, Backend)
 end
 
 local function assertStorable(v, path)
@@ -382,20 +400,39 @@ function Engine:makeDataStoreService()
 				error("Studio access to API services is disabled")
 			end
 			backend.calls += 1
-			engine.task.wait(backend.latency)
+			-- Half the latency is the trip there, half the reply: the commit happens in between,
+			-- so a server that dies while waiting for the reply has still written.
+			local latency = table.remove(backend.latencies, 1) or backend.latency
+			engine.task.wait(latency / 2)
 			if backend.failNext > 0 then
 				backend.failNext -= 1
 				error("502: simulated DataStore failure")
 			end
+			local last = backend.lastWrite[key(k)]
+			if backend.throttleWindow > 0 and last and engine.now - last < backend.throttleWindow then
+				backend.throttled += 1
+				error("Throttled: simulated per-key write limit")
+			end
 			-- Atomic read-transform-write at commit time.
 			local current = deepCopy(backend.data[key(k)])
 			backend.reads += 1
+			local hook = backend.conflict[k]
+			if hook then
+				backend.conflict[k] = nil
+				backend.transformRuns += 1
+				transform(deepCopy(current)) -- this run loses the race; its result is discarded
+				backend.data[key(k)] = hook(deepCopy(current))
+				current = deepCopy(backend.data[key(k)])
+			end
+			backend.transformRuns += 1
 			local result = transform(current)
 			if result ~= nil then
 				assertStorable(result, k)
 				backend.data[key(k)] = deepCopy(result)
 				backend.writes += 1
+				backend.lastWrite[key(k)] = engine.now
 			end
+			engine.task.wait(latency / 2)
 			return deepCopy(result)
 		end
 		return store
@@ -749,15 +786,32 @@ function Engine:shared(name)
 	return self:require(self.replicatedStorage.Shared:FindFirstChild(name))
 end
 
--- Simulates server shutdown: fires BindToClose callbacks (players are also removed).
+-- Simulates server shutdown like Roblox: players are removed, BindToClose callbacks run, and the
+-- process stops as soon as they have all returned (or after 30 s). Work still pending at that
+-- moment never happens: the scheduler is cleared.
 function Engine:shutdown()
+	local closers = {}
 	for _, fn in ipairs(self.bindToClose) do
-		self:spawn(fn)
+		table.insert(closers, self:spawn(fn))
 	end
 	for _, player in ipairs(table.clone(self.players.list)) do
 		self:removePlayer(player)
 	end
-	self:advance(30, 0.1)
+	local deadline = self.now + 30
+	while self.now < deadline do
+		local running = false
+		for _, co in ipairs(closers) do
+			if coroutine.status(co) ~= "dead" then
+				running = true
+			end
+		end
+		if not running then
+			break
+		end
+		self:advance(0.1, 0.1)
+	end
+	table.clear(self.queue)
+	self.stopped = true
 end
 
 -- Every warning produced by Guard.run (a caught runtime error) or uncaught coroutine error.

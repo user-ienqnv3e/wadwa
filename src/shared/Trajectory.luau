@@ -38,15 +38,22 @@ function Trajectory.sample(origin: Vector3, velocity: Vector3, gravity: number, 
 	return points
 end
 
--- Distance from point `p` to the segment a-b.
-function Trajectory.distanceToSegment(a: Vector3, b: Vector3, p: Vector3): number
+-- Closest approach of the segment a-b to point `p`: returns (distance, t) where t in [0, 1] is
+-- how far along the segment the closest point lies.
+function Trajectory.closestOnSegment(a: Vector3, b: Vector3, p: Vector3): (number, number)
 	local ab = b - a
 	local lengthSq = ab:Dot(ab)
 	if lengthSq < 1e-9 then
-		return (p - a).Magnitude
+		return (p - a).Magnitude, 0
 	end
 	local t = math.clamp((p - a):Dot(ab) / lengthSq, 0, 1)
-	return (a + ab * t - p).Magnitude
+	return (a + ab * t - p).Magnitude, t
+end
+
+-- Distance from point `p` to the segment a-b.
+function Trajectory.distanceToSegment(a: Vector3, b: Vector3, p: Vector3): number
+	local distance = Trajectory.closestOnSegment(a, b, p)
+	return distance
 end
 
 -- Hold-to-charge meter: rises from `floor` to 1 over `chargeTime`, then (optionally) sweeps

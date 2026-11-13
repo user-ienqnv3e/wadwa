@@ -30,6 +30,7 @@ export type Session = {
 	released: boolean,
 	lastSaved: number,
 	ownsLock: boolean, -- this server wrote its session lock into the stored record
+	closing: boolean, -- PlayerRemoving has fired: no further gameplay changes are accepted
 }
 
 local DataService = {}
@@ -37,6 +38,7 @@ local DataService = {}
 local sessions: { [Player]: Session } = {}
 local loadedCallbacks: { (Player, Session) -> () } = {}
 local releasingCallbacks: { (Player, Session) -> () } = {}
+local modeChangedCallbacks: { (Player, Session) -> () } = {}
 local store: DataStore? = nil
 local storeMode: "DataStore" | "StudioMemory" = "DataStore"
 local memoryStore: { [string]: any } = {} -- Studio-only fallback, lives as long as this server
@@ -46,6 +48,8 @@ local shuttingDown = false
 -- it: loading earlier would read stale data while still seeing *our* lock, and the late release
 -- would then strip the new session's lock and push it into unsaved mode.
 local releasing: { [string]: boolean } = {}
+-- Number of loads currently running (BindToClose waits for them so their locks are released).
+local loadsInFlight = 0
 
 local function deepCopy(value: any): any
 	if type(value) ~= "table" then
@@ -98,9 +102,17 @@ local function loadRecord(key: string): (any, string?)
 	local lastReason = "unknown"
 	for attempt = 1, Config.Data.LoadRetries do
 		local held = false
+		local corrupt = false
 		local loaded: any = nil
 		local ok, err = pcall(function()
 			dataStore:UpdateAsync(key, function(record: any)
+				-- UpdateAsync may run this transform more than once (e.g. after a write conflict);
+				-- only the outcome of the final call counts, so reset everything first.
+				held, corrupt, loaded = false, false, nil
+				if record ~= nil and type(record) ~= "table" then
+					corrupt = true
+					return nil -- unreadable top-level value: never replace it
+				end
 				local lockState = SaveSchema.evaluateLock(record, jobId, os.time(), Config.Data.SessionLockTimeout)
 				if lockState == "held" then
 					held = true
@@ -115,8 +127,11 @@ local function loadRecord(key: string): (any, string?)
 		if ok and loaded ~= nil then
 			return loaded, nil
 		end
+		if ok and corrupt then
+			return nil, "corrupt_record"
+		end
 		lastReason = if held then "locked_elsewhere" else tostring(err)
-		if attempt < Config.Data.LoadRetries then
+		if attempt < Config.Data.LoadRetries and not shuttingDown then
 			if held then
 				task.wait(Config.Data.LockedRetryDelay)
 			else
@@ -136,7 +151,7 @@ local function releaseLockOnly(key: string)
 	end
 	pcall(function()
 		dataStore:UpdateAsync(key, function(r: any)
-			if SaveSchema.evaluateLock(r, jobId, os.time(), Config.Data.SessionLockTimeout) == "ours" then
+			if type(r) == "table" and SaveSchema.evaluateLock(r, jobId, os.time(), Config.Data.SessionLockTimeout) == "ours" then
 				r.lock = nil
 				return r
 			end
@@ -166,6 +181,7 @@ local function writeRecord(session: Session, release: boolean): boolean
 		local lostLock = false
 		local ok, err = pcall(function()
 			dataStore:UpdateAsync(session.key, function(record: any)
+				lostLock = false -- the transform may be re-run; only its final outcome counts
 				local lockState = SaveSchema.evaluateLock(record, jobId, os.time(), Config.Data.SessionLockTimeout)
 				if lockState ~= "ours" then
 					-- Another server took over (or the record was removed); never overwrite it.
@@ -184,6 +200,10 @@ local function writeRecord(session: Session, release: boolean): boolean
 			session.mode = "Unsaved"
 			session.modeReason = "lock_lost"
 			session.ownsLock = false
+			session.player:SetAttribute("PersistenceMode", "Unsaved")
+			for _, callback in ipairs(modeChangedCallbacks) do
+				task.spawn(callback, session.player, session)
+			end
 			return false
 		end
 		if ok and release then
@@ -224,6 +244,9 @@ end
 
 local function onPlayerAdded(player: Player)
 	local key = keyFor(player)
+	if shuttingDown then
+		return -- never take a lock this server will not be around to release
+	end
 	local record: any, reason: string? = nil, nil
 	local deadline = os.clock() + Config.Data.ReleaseWait
 	while releasing[key] and os.clock() < deadline and player:IsDescendantOf(Players) do
@@ -232,13 +255,25 @@ local function onPlayerAdded(player: Player)
 	if releasing[key] then
 		reason = "previous_session_still_saving"
 	else
-		record, reason = loadRecord(key)
-	end
-	if not player:IsDescendantOf(Players) then
-		-- Left while loading: release the lock we may have just taken without touching the profile.
-		if record then
-			releaseLockOnly(key)
+		-- Counted until the lock is either handed to a session or released again, so BindToClose
+		-- keeps the server alive for both steps.
+		loadsInFlight += 1
+		local ok, loadedRecord, loadReason = pcall(loadRecord, key)
+		if ok then
+			record, reason = loadedRecord, loadReason
+		else
+			reason = tostring(loadedRecord)
 		end
+		if record and (not player:IsDescendantOf(Players) or shuttingDown) then
+			-- Left (or the server began closing) while loading: release the lock we just took
+			-- without touching the profile. A quick rejoin waits on `releasing` meanwhile.
+			releasing[key] = true
+			releaseLockOnly(key)
+			releasing[key] = nil
+		end
+		loadsInFlight -= 1
+	end
+	if not player:IsDescendantOf(Players) or shuttingDown then
 		return
 	end
 
@@ -269,6 +304,7 @@ local function onPlayerAdded(player: Player)
 		released = false,
 		lastSaved = os.clock(),
 		ownsLock = record ~= nil and storeMode == "DataStore",
+		closing = false,
 	}
 	sessions[player] = session
 	player:SetAttribute("PersistenceMode", mode)
@@ -282,6 +318,8 @@ local function onPlayerRemoving(player: Player)
 	if not session then
 		return
 	end
+	-- Stop accepting gameplay changes at once: anything after the final snapshot would be lost.
+	session.closing = true
 	for _, callback in ipairs(releasingCallbacks) do
 		pcall(callback, player, session)
 	end
@@ -293,7 +331,7 @@ end
 
 function DataService.getSession(player: Player): Session?
 	local session = sessions[player]
-	if session and not session.released then
+	if session and not session.released and not session.closing then
 		return session
 	end
 	return nil
@@ -313,6 +351,11 @@ end
 
 function DataService.onReleasing(callback: (Player, Session) -> ())
 	table.insert(releasingCallbacks, callback)
+end
+
+-- Fires when a live session stops saving (its lock was taken over by another server).
+function DataService.onModeChanged(callback: (Player, Session) -> ())
+	table.insert(modeChangedCallbacks, callback)
 end
 
 function DataService.storeMode(): string
@@ -347,7 +390,7 @@ function DataService.init()
 			end)
 		end
 		local deadline = os.clock() + Config.Data.ShutdownBudget
-		while pending > 0 and os.clock() < deadline do
+		while (pending > 0 or loadsInFlight > 0) and os.clock() < deadline do
 			task.wait(0.2)
 		end
 	end)

@@ -53,6 +53,85 @@ for _, d in ipairs(game:GetDescendants()) do
 	end
 end
 
+-- Every script/module in the place must match its repository source exactly (source parity),
+-- and nothing from the offline test harness may ship.
+local roots = {
+	{ game:GetService("ReplicatedStorage"):FindFirstChild("Shared"), "src/shared" },
+	{ game:GetService("ServerScriptService"):FindFirstChild("Server"), "src/server" },
+	{ find(game:GetService("StarterPlayer"), { "StarterPlayerScripts", "Client" }), "src/client" },
+}
+local suffix = { ModuleScript = ".luau", Script = ".server.luau", LocalScript = ".client.luau" }
+local parity, mismatched = 0, {}
+for _, entry in ipairs(roots) do
+	local root, dir = entry[1], entry[2]
+	for _, d in ipairs(root and root:GetDescendants() or {}) do
+		if d:IsA("LuaSourceContainer") then
+			local rel = {}
+			local node = d
+			while node and node ~= root do
+				table.insert(rel, 1, node.Name)
+				node = node.Parent
+			end
+			local file = dir .. "/" .. table.concat(rel, "/") .. suffix[d.ClassName]
+			if fs.isFile(file) and fs.readFile(file) == d.Source then
+				parity += 1
+			else
+				table.insert(mismatched, file)
+			end
+		end
+	end
+end
+check(
+	#mismatched == 0,
+	string.format(
+		"all %d scripts match their repository sources%s",
+		parity,
+		if #mismatched > 0 then " (mismatch: " .. table.concat(mismatched, ", ") .. ")" else ""
+	)
+)
+local repoFiles = 0
+for _, dir in ipairs({ "src/shared", "src/server", "src/client" }) do
+	local function walk(path)
+		for _, name in ipairs(fs.readDir(path)) do
+			local full = path .. "/" .. name
+			if fs.isDir(full) then
+				walk(full)
+			elseif string.sub(name, -5) == ".luau" then
+				repoFiles += 1
+			end
+		end
+	end
+	walk(dir)
+end
+check(repoFiles == parity, string.format("every repository source file is in the place (%d files)", repoFiles))
+local banned = { "__sim", "attachClient", "isSimPlayer", "@lune/", "DEBUG_", "GrantCoins", "giveCoins", "devReward", "_G.WildFeast" }
+local leaks = {}
+for _, d in ipairs(game:GetDescendants()) do
+	if d:IsA("LuaSourceContainer") then
+		for _, word in ipairs(banned) do
+			if string.find(d.Source, word, 1, true) then
+				table.insert(leaks, d:GetFullName() .. " contains " .. word)
+			end
+		end
+	end
+	local lname = string.lower(d.Name)
+	if d:IsA("LuaSourceContainer") and (string.find(lname, "test") or string.find(lname, "sim") or string.find(lname, "fuzz")) then
+		table.insert(leaks, d:GetFullName() .. " looks like a test harness")
+	end
+end
+check(
+	#leaks == 0,
+	"no test harness, debug reward hooks or simulator code shipped" .. (if #leaks > 0 then ": " .. table.concat(leaks, "; ") else "")
+)
+local remotesFolder = find(game:GetService("ReplicatedStorage"), { "Remotes" })
+local onlyRemoteEvents = true
+for _, r in ipairs(remotesFolder and remotesFolder:GetChildren() or {}) do
+	if r.ClassName ~= "RemoteEvent" then
+		onlyRemoteEvents = false
+	end
+end
+check(onlyRemoteEvents, "Remotes folder holds RemoteEvents only (no RemoteFunctions the server could be made to yield on)")
+
 local remotes = find(game:GetService("ReplicatedStorage"), { "Remotes" })
 local remoteCount = 0
 for _, r in ipairs(remotes and remotes:GetChildren() or {}) do

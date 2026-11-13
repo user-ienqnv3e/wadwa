@@ -64,6 +64,11 @@ local TABS = { "Pantry", "Upgrades", "Map", "Journal", "Settings" }
 local TAB_KEYS = { Pantry = "P", Upgrades = "U", Map = "M", Journal = "J", Settings = "O" }
 local TAB_ICONS = { Pantry = "🍓", Upgrades = "⬆", Map = "🗺", Journal = "📖", Settings = "⚙" }
 
+-- Purchases waiting for the server's answer. A second tap on the same button before the next
+-- state push is ignored (the server also drops stale `expect` values), so nothing is bought twice.
+local pending: { [string]: number } = {}
+local PENDING_TIMEOUT = 2.5
+
 local function send(kind: string, fields: { [string]: any }?)
 	local payload: { [string]: any } = { kind = kind }
 	if fields then
@@ -96,35 +101,76 @@ local function fingerprint(value: any): string
 	return "{" .. table.concat(parts, ",") .. "}"
 end
 
+-- Live toasts by text, so a repeated message (spamming a locked button, many identical rewards)
+-- refreshes one toast with a ×N count instead of flooding the screen.
+local toasts: { [string]: { label: TextLabel, count: number, token: number } } = {}
+local TOAST_SECONDS = 4
+local MAX_TOASTS = 4
+local toastSeq = 0
+
 function Hud.toast(text: string, kind: string?)
 	local colors = { success = C.Good, warn = C.Warn, error = C.Bad, info = C.Info }
 	local icons = { success = "✓", warn = "⚠", error = "✕", info = "ℹ" }
 	local k = kind or "info"
-	local toast = Ui.new("TextLabel", {
-		Size = UDim2.new(1, 0, 0, 0),
-		AutomaticSize = Enum.AutomaticSize.Y,
-		BackgroundColor3 = colors[k] or C.Info,
-		Text = (icons[k] or "ℹ") .. "  " .. text,
-		TextColor3 = C.White,
-		TextWrapped = true,
-		TextSize = 18,
-		FontFace = Ui.BoldFont,
-		LayoutOrder = math.floor(os.clock() * 100),
-		Parent = toastHolder,
-	}, { Ui.corner(10), Ui.padding(8) })
-	local children = toastHolder:GetChildren()
-	local labels = {}
-	for _, child in ipairs(children) do
-		if child:IsA("TextLabel") then
-			table.insert(labels, child)
+	local base = (icons[k] or "ℹ") .. "  " .. string.sub(text, 1, 240)
+	toastSeq += 1
+	local token = toastSeq
+	local existing = toasts[base]
+	if existing and existing.label.Parent then
+		existing.count += 1
+		existing.token = token
+		existing.label.Text = string.format("%s  ×%d", base, existing.count)
+		existing.label.LayoutOrder = token
+	else
+		local label = Ui.new("TextLabel", {
+			Size = UDim2.new(1, 0, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			BackgroundColor3 = colors[k] or C.Info,
+			Text = base,
+			TextColor3 = C.White,
+			TextWrapped = true,
+			TextSize = 18,
+			FontFace = Ui.BoldFont,
+			LayoutOrder = token,
+			Parent = toastHolder,
+		}, { Ui.corner(10), Ui.padding(8) })
+		local created = { label = label, count = 1, token = token }
+		existing = created
+		toasts[base] = created
+		-- Keep at most MAX_TOASTS on screen: drop the oldest.
+		local live = {}
+		for key, entry in pairs(toasts) do
+			if entry.label.Parent then
+				table.insert(live, { key = key, entry = entry })
+			else
+				toasts[key] = nil
+			end
+		end
+		table.sort(live, function(a, b)
+			return a.entry.token < b.entry.token
+		end)
+		for i = 1, #live - MAX_TOASTS do
+			live[i].entry.label:Destroy()
+			toasts[live[i].key] = nil
 		end
 	end
-	if #labels > 4 then
-		labels[1]:Destroy()
-	end
-	task.delay(4, function()
-		toast:Destroy()
+	local entry = existing :: { label: TextLabel, count: number, token: number }
+	task.delay(TOAST_SECONDS, function()
+		-- Only the latest repeat's timer removes it.
+		if entry.token == token then
+			entry.label:Destroy()
+			if toasts[base] == entry then
+				toasts[base] = nil
+			end
+		end
 	end)
+end
+
+-- Assigns a property only when it changes (per-frame code must not churn unchanged UI).
+local function setIfChanged(inst: Instance, property: string, value: any)
+	if (inst :: any)[property] ~= value then
+		(inst :: any)[property] = value
+	end
 end
 
 local function cluster(name: string, props: { [string]: any }): Frame
@@ -233,10 +279,20 @@ end
 local function actionButton(parent: Instance, name: string, text: string, enabled: boolean, order: number, onClick: () -> ())
 	local button = Ui.button({ Name = name, Text = text, Size = UDim2.new(1, 0, 0, 52), LayoutOrder = order, Parent = parent }, enabled)
 	button.Activated:Connect(function()
+		local since = pending[name]
+		if since and os.clock() - since < PENDING_TIMEOUT then
+			return
+		end
 		Effects.play("click")
 		onClick()
 	end)
 	return button
+end
+
+-- Sends a repeatable purchase once, tagged with the level/stock the player was looking at.
+local function purchase(buttonName: string, kind: string, id: string, expect: number)
+	pending[buttonName] = os.clock()
+	send(kind, { id = id, expect = expect })
 end
 
 local BUILDERS: { [string]: (any) -> () } = {}
@@ -276,7 +332,7 @@ BUILDERS.Pantry = function(profile)
 				affordable,
 				3,
 				function()
-					send("BuyFood", { id = foodId })
+					purchase("Buy_" .. foodId, "BuyFood", foodId, profile.inventory[foodId] or 0)
 				end
 			)
 		elseif food.RequiresHabitat and not profile.unlockedHabitats[food.RequiresHabitat] then
@@ -344,7 +400,7 @@ BUILDERS.Upgrades = function(profile)
 						affordable,
 						3,
 						function()
-							send("BuyUpgrade", { id = id })
+							purchase("Upgrade_" .. id, "BuyUpgrade", id, level)
 						end
 					)
 				else
@@ -407,7 +463,7 @@ BUILDERS.Map = function(profile)
 					affordable,
 					4,
 					function()
-						send("Restore", { id = id })
+						purchase("Restore_" .. id, "Restore", id, level)
 					end
 				)
 			else
@@ -502,12 +558,12 @@ BUILDERS.Journal = function(profile)
 	local r = row(20)
 	Ui.label({
 		Text = string.format(
-			"Meals served: %d · Perfect catches: %d · Feasts joined: %d (completed %d) · Coins earned: %d",
-			s.totalFeeds,
-			s.perfectCatches,
-			s.feastsJoined,
-			s.feastsCompleted,
-			s.coinsEarned
+			"Meals served: %s · Perfect catches: %s · Feasts joined: %s (completed %s) · Coins earned: %s",
+			Ui.formatNumber(s.totalFeeds),
+			Ui.formatNumber(s.perfectCatches),
+			Ui.formatNumber(s.feastsJoined),
+			Ui.formatNumber(s.feastsCompleted),
+			Ui.formatNumber(s.coinsEarned)
 		),
 		TextSize = 16,
 		LayoutOrder = 1,
@@ -605,7 +661,18 @@ end
 -- HUD refresh
 --------------------------------------------------------------------------------
 
+local foodBarKey = ""
 local function rebuildFoodBar(profile: any)
+	local key = table.concat({
+		Store.inputMode,
+		tostring(profile.selectedFood),
+		fingerprint(profile.unlockedFoods),
+		fingerprint(profile.inventory),
+	}, "|")
+	if key == foodBarKey then
+		return -- coins or trust changed, not the food bar: keep its buttons (and any tap) intact
+	end
+	foodBarKey = key
 	for _, child in ipairs(foodBar:GetChildren()) do
 		if child:IsA("TextButton") then
 			child:Destroy()
@@ -710,14 +777,15 @@ local function refresh()
 	if not profile then
 		return
 	end
+	table.clear(pending) -- the server has answered every purchase sent before this push
 	local hudFingerprint = table.concat({ Store.inputMode, Store.persistence, fingerprint(profile) }, "|")
 	if hudFingerprint == hudKey then
 		return
 	end
 	hudKey = hudFingerprint
 	local found, total = Economy.discoveryCount(Config, profile)
-	resources.coins.Text = string.format("🪙 Coins  %d", profile.coins)
-	resources.research.Text = string.format("🔬 Research  %d", profile.research)
+	resources.coins.Text = "🪙 Coins  " .. Ui.formatNumber(profile.coins)
+	resources.research.Text = "🔬 Research  " .. Ui.formatNumber(profile.research)
 	resources.journal.Text = string.format("📖 Discoveries  %d/%d", found, total)
 	local goal = Economy.nextGoal(Config, profile)
 	goalText.Text = goal.text
@@ -725,7 +793,7 @@ local function refresh()
 		goalBar.Visible = true
 		local fill = goalBar:FindFirstChild("Fill") :: Frame
 		fill.Size = UDim2.fromScale(math.clamp((goal.progress or 0) / goal.target, 0, 1), 1)
-		goalBarText.Text = string.format("%d / %d", goal.progress or 0, goal.target)
+		goalBarText.Text = Ui.formatNumber(goal.progress or 0) .. " / " .. Ui.formatNumber(goal.target)
 	else
 		goalBar.Visible = false
 	end
@@ -753,27 +821,27 @@ end
 local function refreshFeast()
 	local feast = Store.feast
 	if not feast then
-		feastBanner.Visible = false
+		setIfChanged(feastBanner, "Visible", false)
 		return
 	end
-	local remaining = math.max(0, math.ceil(feast.deadline - workspace:GetServerTimeNow()))
+	local remaining = math.max(0, math.ceil((tonumber(feast.deadline) or 0) - workspace:GetServerTimeNow()))
+	local text: string? = nil
 	if feast.state == "Active" then
-		feastBanner.Visible = true
-		feastBanner.Text = string.format(
+		text = string.format(
 			"🐋 GRAND FEAST  %d / %d fed  ·  ⏱ %ds  ·  You: %d",
-			feast.progress,
-			feast.goal,
+			feast.progress or 0,
+			feast.goal or 0,
 			remaining,
 			feast.yourPoints or 0
 		)
 	elseif feast.state == "Ready" then
-		feastBanner.Visible = true
-		feastBanner.Text = string.format("🔔 Feast ready at Feast Cove (south pier) — ring the bell! Auto-start in %ds", remaining)
+		text = string.format("🔔 Feast ready at Feast Cove (south pier) — ring the bell! Auto-start in %ds", remaining)
 	elseif feast.state == "Arriving" then
-		feastBanner.Visible = true
-		feastBanner.Text = "🐋 The " .. Config.Feast.GiantName .. " is surfacing at Feast Cove!"
-	else
-		feastBanner.Visible = false
+		text = "🐋 The " .. Config.Feast.GiantName .. " is surfacing at Feast Cove!"
+	end
+	setIfChanged(feastBanner, "Visible", text ~= nil)
+	if text then
+		setIfChanged(feastBanner, "Text", text)
 	end
 end
 
@@ -935,7 +1003,11 @@ function Hud.init()
 	local function endThrowTouch(input: InputObject)
 		if input == throwTouch then
 			throwTouch = nil
-			ThrowController.release("touch")
+			if input.UserInputState == Enum.UserInputState.Cancel then
+				ThrowController.cancel()
+			else
+				ThrowController.release("touch")
+			end
 		end
 	end
 	throwButton.InputEnded:Connect(endThrowTouch)
@@ -1154,27 +1226,35 @@ function Hud.init()
 
 	RunService.RenderStepped:Connect(function()
 		local touch = throwTouch
-		if touch and (touch.UserInputState == Enum.UserInputState.End or touch.UserInputState == Enum.UserInputState.Cancel) then
+		if touch and touch.UserInputState == Enum.UserInputState.End then
 			endThrowTouch(touch)
+		elseif touch and touch.UserInputState == Enum.UserInputState.Cancel then
+			-- The system took the touch away (gesture, call, notification): never throw.
+			throwTouch = nil
+			ThrowController.cancel()
 		end
 		local charging = ThrowController.charging
 		local cooldown = ThrowController.cooldownRemaining()
-		powerFrame.Visible = charging or cooldown > 0
+		setIfChanged(powerFrame, "Visible", charging or cooldown > 0)
 		if charging then
 			local power = ThrowController.power
-			powerFill.Size = UDim2.fromScale(power, 1)
-			powerText.Text = string.format("POWER %d%%  —  release to throw", math.floor(power * 100 + 0.5))
+			setIfChanged(powerFill, "Size", UDim2.fromScale(power, 1))
+			setIfChanged(powerText, "Text", string.format("POWER %d%%  —  release to throw", math.floor(power * 100 + 0.5)))
 		elseif cooldown > 0 then
-			powerFill.Size = UDim2.fromScale(0, 1)
-			powerText.Text = string.format("Ready in %.1fs", cooldown)
+			setIfChanged(powerFill, "Size", UDim2.fromScale(0, 1))
+			setIfChanged(powerText, "Text", string.format("Ready in %.1fs", cooldown))
 		end
-		throwButton.Text = if charging
-			then string.format("RELEASE\n%d%%", math.floor(ThrowController.power * 100 + 0.5))
-			elseif cooldown > 0 then "WAIT…"
-			else "HOLD\nTO THROW"
+		setIfChanged(
+			throwButton,
+			"Text",
+			if charging
+				then string.format("RELEASE\n%d%%", math.floor(ThrowController.power * 100 + 0.5))
+				elseif cooldown > 0 then "WAIT…"
+				else "HOLD\nTO THROW"
+		)
 		local isKeyboard = Store.inputMode == "keyboard"
 		local isGamepad = Store.inputMode == "gamepad"
-		crosshair.Visible = (charging and not isKeyboard) or (isGamepad and not panel.Visible)
+		setIfChanged(crosshair, "Visible", (charging and not isKeyboard) or (isGamepad and not panel.Visible))
 		if Store.feast and (Store.feast.state == "Active" or Store.feast.state == "Ready") then
 			refreshFeast()
 		end

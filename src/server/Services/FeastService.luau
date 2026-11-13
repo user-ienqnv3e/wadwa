@@ -94,10 +94,10 @@ local function broadcast()
 	end
 end
 
-local function playersPresent(): number
+local function playersPresent(except: Player?): number
 	local n = 0
 	for _, player in ipairs(Players:GetPlayers()) do
-		if deps.getProfile(player) then
+		if player ~= except and deps.getProfile(player) then
 			n += 1
 		end
 	end
@@ -284,6 +284,23 @@ function FeastService.init(dependencies: Deps, world: Instance)
 
 	Players.PlayerAdded:Connect(function()
 		dirty = true
+	end)
+	-- The appetite only ever shrinks mid-event: when players leave, whoever stays can still finish
+	-- (joiners help for free and never make it harder).
+	Players.PlayerRemoving:Connect(function(leaving)
+		Guard.run("Feast rescale", function()
+			if state ~= "Active" and state ~= "Arriving" then
+				return
+			end
+			local rescaled = FeastRules.goalFor(feastConfig, playersPresent(leaving))
+			if rescaled < goal then
+				goal = math.max(rescaled, 1)
+				dirty = true
+				if state == "Active" and progress >= goal then
+					finish(true)
+				end
+			end
+		end)
 	end)
 	setState("Waiting", feastConfig.FirstDelay)
 	RunService.Heartbeat:Connect(function(dt)

@@ -37,6 +37,14 @@ local KINDS = {
 	RequestState = true,
 }
 
+-- Repeatable purchases carry the level/stock the client was looking at (`expect`). A request
+-- whose expectation no longer matches is a duplicate (double tap, resend) and is dropped, so one
+-- tap can never buy two levels.
+local function expectMatches(payload: any, current: number): boolean
+	local expect = payload.expect
+	return type(expect) == "number" and math.floor(expect) == expect and expect == current
+end
+
 local function stringField(payload: any, key: string): string?
 	local value = payload[key]
 	if type(value) == "string" and #value > 0 and #value <= Config.Remote.MaxStringLength then
@@ -47,6 +55,9 @@ end
 
 function ActionService.init(deps: Deps)
 	local function handle(player: Player, raw: any)
+		if player.Parent ~= Players then
+			return -- queued events from a player who already left
+		end
 		if not limiter:allow(player, os.clock()) then
 			return
 		end
@@ -72,6 +83,10 @@ function ActionService.init(deps: Deps)
 			if not id then
 				return
 			end
+			if Config.Foods[id] and not expectMatches(payload, profile.inventory[id] or 0) then
+				deps.markDirty(player)
+				return
+			end
 			ok, message = Economy.tryBuyFoodBatch(Config, profile, id)
 		elseif kind == "UnlockFood" then
 			local id = stringField(payload, "id")
@@ -87,6 +102,10 @@ function ActionService.init(deps: Deps)
 			if not id then
 				return
 			end
+			if Config.Upgrades[id] and not expectMatches(payload, Economy.upgradeLevel(profile, id)) then
+				deps.markDirty(player)
+				return
+			end
 			ok, message = Economy.tryBuyUpgrade(Config, profile, id)
 		elseif kind == "UnlockHabitat" then
 			local id = stringField(payload, "id")
@@ -97,6 +116,10 @@ function ActionService.init(deps: Deps)
 		elseif kind == "Restore" then
 			local id = stringField(payload, "id")
 			if not id then
+				return
+			end
+			if Config.Habitats[id] and not expectMatches(payload, Economy.restorationLevel(profile, id)) then
+				deps.markDirty(player)
 				return
 			end
 			ok, message = Economy.tryRestore(Config, profile, id)

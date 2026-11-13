@@ -31,9 +31,9 @@ src/server   (ServerScriptService.Server) Main + Services: Data, State, Animal, 
 src/client   (StarterPlayerScripts.Client) Store, ThrowController, Effects, WorldVisuals, Hud, Ui
 ```
 
-- **Server-authoritative.** The client sends only `(foodId, unitDirection, power)` and small action tables. The server checks types, string lengths, NaN/inf, unit length, pitch range, food ownership/unlocks, the cooldown (plus a token bucket), whether the character is alive, the origin, and per-player/global projectile caps. It launches from the character's own head and simulates the arc itself. It decides mouth/body/ground hits, the max range, and whether the habitat is unlocked before paying a reward. Clients only render the broadcast arc.
+- **Server-authoritative.** The client sends only `(foodId, unitDirection, power)` and small action tables. The server checks types, string lengths, NaN/inf, unit length, pitch range, food ownership/unlocks, the cooldown (plus a token bucket), whether the character is alive, the origin, and per-player/global projectile caps. It launches from the character's own head (a client-reported head is used only within 6 studs and with line of sight) and simulates the arc itself, testing world geometry before any mouth or body so food never passes through walls. Repeatable purchases carry the level or stock the player saw (`expect`), so a double tap buys once. It decides mouth/body/ground hits, the max range, and whether the habitat is unlocked before paying a reward. Clients only render the broadcast arc.
 - **Bounded resources.** At most 24 animals, 4 projectiles per player and 64 in total, 6 ground foods per player and 60 in total (12 s lifetime), and 24 client effects. Saves are capped and sanitised.
-- **Persistence.** Profiles are versioned (schema v2 with a v1 migration). Loads use `UpdateAsync` session locks inside pcall, with bounded retries and backoff. If a load fails, the profile is locked elsewhere, or the save comes from a newer schema, the session runs in *Unsaved* mode: the player is told, and their data is never overwritten. Saves autosave every 120 s and save + release on leave and on `BindToClose`. In Studio without API access, the game uses an explicitly labelled **Studio memory** mode (banner shown). Live servers never fall back to memory.
+- **Persistence.** Profiles are versioned (schema v2 with a v1 migration). Loads use `UpdateAsync` session locks inside pcall, with bounded retries and backoff. If a load fails, the stored record is corrupt, the profile is locked elsewhere, or the save comes from a newer schema, the session runs in *Unsaved* mode: the player is told, and their data is never overwritten. Saves autosave every 120 s and save + release on leave and on `BindToClose`. In Studio without API access, the game uses an explicitly labelled **Studio memory** mode (banner shown). Live servers never fall back to memory.
 - **Per-player world.** Gates and restoration visuals are applied locally from each player's own profile. The server still enforces access: anyone found inside a locked island is moved back, and players who fall into the sea are rescued.
 - No HTTP, `loadstring`, external `require(assetId)`, model scripts or uploaded assets. The sounds are built-in `rbxasset://` engine sounds.
 
@@ -42,13 +42,16 @@ src/client   (StarterPlayerScripts.Client) Store, ThrowController, Effects, Worl
 Tools are pinned in `mise.toml` (Rojo 7.7.1, Lune 0.11.1, luau-lsp, selene, StyLua).
 
 ```sh
-./scripts/build.sh               # rojo build -> lune bake world -> lune reopen & verify WildFeastIslands.rbxl
-lune run tests/run.luau          # 28 unit tests: rules, validation, persistence schema, feast, builders
-lune run tests/integration.luau  # 27 server scenarios run from the built place file in the simulator
-lune run tests/client.luau       # 15 client+server scenarios (input, menus, layout arithmetic)
+./scripts/build.sh                 # rojo build -> lune bake world -> lune reopen & verify (source parity, no harness shipped)
+lune run tests/run.luau            # 34 unit tests: rules, validation, schema/migration, progression simulation, builders
+lune run tests/integration.luau    # 45 server scenarios run from the built place file in the simulator
+lune run tests/client.luau         # 21 client+server scenarios (input, menus, purchases, HUD stability, layout arithmetic)
+lune run tests/fuzz.luau [place] [extraSeeds=2] [steps=250]   # seeded randomized sessions with invariants
 rojo sourcemap -o sourcemap.json && luau-lsp analyze --definitions=<roblox globalTypes.d.luau> --sourcemap=sourcemap.json src
 selene src && stylua --check src tests scripts
 ```
+
+Every suite takes the place path as its first argument, so you can also run it against an older build to confirm a regression fails there.
 
 For live development, run `rojo serve`. The server rebuilds the world when the baked folder is missing.
 
@@ -58,29 +61,30 @@ For live development, run `rojo serve`. The server rebuilds the world when the b
 
 ## Verification status
 
+See [`docs/QA.md`](docs/QA.md) for the QA matrix, the 20 defects fixed in the latest pass (each with a regression confirmed failing on the pre-fix build), the harness audit and the resource audit.
+
 **Performed (offline, outside Roblox Studio):**
-- `luau-lsp analyze` in `--!strict` against the Roblox API definitions: 0 errors. selene: 0 errors. StyLua check passes.
-- 28 unit tests, 27 server integration scenarios and 15 client scenarios pass. The scenarios cover:
-  - Boot from the place file, join and state push.
-  - Tutorial catch, ground feeding and edge-of-island feeding.
-  - Gates, origin tolerance, spam caps, death/respawn/leave cleanup.
-  - Stuck recovery, model rebuild, long-run island bounds.
-  - Solo, three-player and timed-out feasts with single payment.
-  - Save/rejoin, a quick rejoin during a retried save, foreign locks, newer schemas, an outage at join, shutdown and Studio memory mode.
-  - Hostile payloads, sea rescue and locked-island bounce.
-  - On the client: every tab with new and advanced profiles, keyboard/touch/gamepad throws, slide-off and cancelled touches, respawn while charging, the pantry prompt, buying through the UI, no rebuild on identical pushes, the bell button, and HUD overlap at 667×375, 844×390, 1024×768 and 1366×768.
-- `WildFeastIslands.rbxl` was rebuilt and reopened with Lune. It has the binary `<roblox!` header, script sources that match the repo, 6 remotes and 678 baked world parts.
+- `luau-lsp analyze` in `--!strict` against the Roblox API definitions: 0 errors. selene `src`: 0 errors. StyLua check passes.
+- 34 unit tests, 45 server integration scenarios and 21 client scenarios pass.
+- Two batches of seeded randomized sessions pass. Each seed runs joins, leaves, rejoins, deaths, teleports, throws, purchases, bells, DataStore failures and hostile payloads, with invariants checked every step and saves checked at shutdown.
+- `WildFeastIslands.rbxl` is rebuilt reproducibly (byte-identical across rebuilds) and reopened with Lune. The checks confirm:
+  - the binary `<roblox!` header
+  - all 26 scripts match their repository sources
+  - no test harness, simulator or debug reward code
+  - 6 RemoteEvents
+  - 678 baked world parts
+
+All of this ran either as offline simulation of the real scripts or as unit/static checks. **None of it ran in the Roblox engine**, and reopening with Lune isn't the same as opening in Studio.
 
 **Not verified (needs Roblox Studio / devices / live servers, which weren't available here):**
 - Real Studio playtests and play sessions.
 - Real physics and character movement (gates opened locally, bridge and pier collisions, falling).
-- Actual on-screen layout with the top-bar safe insets and text wrapping.
-- The real touch jump-button position (the HUD reads it when present and falls back to PlayerModule's documented numbers).
-- Gamepad selection and navigation behaviour.
+- Actual on-screen layout with the top-bar safe insets, fonts and text wrapping on phones, tablets and desktops (the layout tests are arithmetic only).
+- The real touch jump-button position, multitouch, and gamepad selection visuals.
 - Two real clients and reconnects over a real network.
 - DataStore throttling and real `UpdateAsync` ordering.
 - Whether the built-in sound paths load.
-- Frame time and network cost.
+- Frame time, memory and network cost (none measured).
 
 Please playtest in Studio before publishing. The game has not been published, and no purchases are configured.
 
