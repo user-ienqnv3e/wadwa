@@ -19,6 +19,7 @@ type Deps = {
 	markDirty: (Player) -> (),
 	notify: (Player, string, string?) -> (),
 	ringBell: (Player) -> boolean,
+	summon: (string, Player) -> (boolean, string),
 }
 
 local ActionService = {}
@@ -35,6 +36,14 @@ local KINDS = {
 	SetSetting = true,
 	RingBell = true,
 	RequestState = true,
+	-- expansion
+	Cook = true,
+	ClaimQuest = true,
+	BuyDecor = true,
+	PlaceDecor = true,
+	RemoveDecor = true,
+	UseLure = true,
+	PinFood = true,
 }
 
 -- Repeatable purchases carry the level/stock the client was looking at (`expect`). A request
@@ -137,6 +146,67 @@ function ActionService.init(deps: Deps)
 		elseif kind == "RequestState" then
 			deps.markDirty(player)
 			return
+		elseif kind == "Cook" then
+			local id = stringField(payload, "id")
+			if not id or not Config.Recipes[id] then
+				return
+			end
+			if not expectMatches(payload, profile.cooked[id] or 0) then
+				deps.markDirty(player)
+				return
+			end
+			ok, message = Economy.tryCook(Config, profile, id)
+		elseif kind == "ClaimQuest" then
+			local id = stringField(payload, "id")
+			if not id then
+				return
+			end
+			ok, message = Economy.tryClaimQuest(Config, profile, id)
+			if not ok and profile.questsClaimed[id] then
+				message = nil -- a repeated tap on a claimed quest: nothing to say
+			end
+		elseif kind == "BuyDecor" then
+			local id = stringField(payload, "id")
+			if not id or not Config.Decorations[id] then
+				return
+			end
+			if not expectMatches(payload, profile.decorOwned[id] or 0) then
+				deps.markDirty(player)
+				return
+			end
+			ok, message = Economy.tryBuyDecoration(Config, profile, id)
+		elseif kind == "PlaceDecor" then
+			local id, habitat = stringField(payload, "id"), stringField(payload, "habitat")
+			if not id or not habitat then
+				return
+			end
+			ok, message = Economy.tryPlaceDecoration(Config, profile, id, habitat, payload.slot)
+		elseif kind == "RemoveDecor" then
+			local habitat = stringField(payload, "habitat")
+			if not habitat then
+				return
+			end
+			ok, message = Economy.tryRemoveDecoration(Config, profile, habitat, payload.slot)
+		elseif kind == "UseLure" then
+			local id = stringField(payload, "id")
+			if not id then
+				return
+			end
+			local usable, reason = Economy.canUseLure(Config, profile, id)
+			if not usable then
+				ok, message = false, reason
+			else
+				ok, message = deps.summon(id, player)
+				if ok then
+					Economy.consumeLure(Config, profile, id)
+				end
+			end
+		elseif kind == "PinFood" then
+			local id = stringField(payload, "id")
+			if not id then
+				return
+			end
+			ok, message = Economy.tryTogglePin(Config, profile, id)
 		end
 
 		if message then

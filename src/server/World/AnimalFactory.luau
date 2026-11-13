@@ -176,6 +176,108 @@ local ARCHETYPES: { [string]: (Adder, Color3, Color3) -> (Vector3, number) } = {
 	end,
 }
 
+-- Expansion body plans for visiting species.
+ARCHETYPES.frog = function(add, body, accent)
+	add("Head", Enum.PartType.Ball, Vector3.new(2.6, 1.6, 2.2), CFrame.new(0, 0.6, -1.3), body)
+	for _, side in ipairs({ -1, 1 }) do
+		add("EyeBump", Enum.PartType.Ball, Vector3.new(0.9, 0.9, 0.9), CFrame.new(side * 0.75, 1.45, -1.6), body)
+		add("Leg", nil, Vector3.new(0.9, 0.5, 1.8), CFrame.new(side * 1.3, -0.9, 0.6), accent)
+		add("Foot", nil, Vector3.new(1, 0.2, 0.9), CFrame.new(side * 0.9, -1.15, -1.2), accent)
+	end
+	eyes(add, 0.75, 1.55, -2.0, 0.45)
+	add("Belly", Enum.PartType.Ball, Vector3.new(2.4, 1.4, 2.2), CFrame.new(0, -0.5, -0.4), accent:Lerp(WHITE, 0.5))
+	return Vector3.new(0, 0.3, -2.4), 1.25
+end
+ARCHETYPES.snail = function(add, body, accent)
+	add("Shell", Enum.PartType.Ball, Vector3.new(2.8, 2.8, 2.6), CFrame.new(0, 1.3, 0.5), accent)
+	add("Swirl", Enum.PartType.Ball, Vector3.new(1.2, 1.2, 2.7), CFrame.new(0, 1.4, 0.5), accent:Lerp(WHITE, 0.4))
+	add("Neck", nil, Vector3.new(1, 1.6, 1), CFrame.new(0, 0.6, -1.4), body)
+	for _, side in ipairs({ -1, 1 }) do
+		add("Stalk", nil, Vector3.new(0.2, 1, 0.2), CFrame.new(side * 0.3, 1.8, -1.5), body)
+		add("EyeBall", Enum.PartType.Ball, Vector3.new(0.4, 0.4, 0.4), CFrame.new(side * 0.3, 2.35, -1.55), BLACK)
+	end
+	return Vector3.new(0, 0.4, -2.0), 0.6
+end
+ARCHETYPES.moth = function(add, body, accent)
+	add("Head", Enum.PartType.Ball, Vector3.new(1.4, 1.4, 1.4), CFrame.new(0, 0.5, -1.6), body)
+	eyes(add, 0.4, 0.7, -2.2, 0.4)
+	for _, side in ipairs({ -1, 1 }) do
+		add("Wing", nil, Vector3.new(2.6, 0.15, 2.2), CFrame.new(side * 1.9, 0.7, -0.2) * CFrame.Angles(0, 0, math.rad(side * 18)), accent)
+		add(
+			"HindWing",
+			nil,
+			Vector3.new(1.6, 0.12, 1.4),
+			CFrame.new(side * 1.4, 0.4, 1.1) * CFrame.Angles(0, 0, math.rad(side * 12)),
+			accent:Lerp(body, 0.4)
+		)
+	end
+	return Vector3.new(0, 0.3, -2.3), 1.6
+end
+ARCHETYPES.boar = function(add, body, accent)
+	add("Head", nil, Vector3.new(2, 1.8, 1.8), CFrame.new(0, 0.6, -2.2), body)
+	add("Snout", Enum.PartType.Cylinder, Vector3.new(0.6, 1, 1), CFrame.new(0, 0.3, -3.3) * CFrame.Angles(0, math.rad(90), 0), accent)
+	eyes(add, 0.5, 1.0, -3.15, 0.3)
+	for _, side in ipairs({ -1, 1 }) do
+		add("Tusk", nil, Vector3.new(0.2, 0.6, 0.2), CFrame.new(side * 0.55, 0.0, -3.4), WHITE)
+		add("Ear", nil, Vector3.new(0.6, 0.7, 0.3), CFrame.new(side * 0.8, 1.7, -2.0) * CFrame.Angles(0, 0, math.rad(-side * 25)), accent)
+		add("Leg", nil, Vector3.new(0.6, 1, 0.6), CFrame.new(side * 0.8, -1.3, -1.1), body:Lerp(BLACK, 0.3))
+		add("Leg", nil, Vector3.new(0.6, 1, 0.6), CFrame.new(side * 0.8, -1.3, 1.1), body:Lerp(BLACK, 0.3))
+	end
+	return Vector3.new(0, 0.2, -3.7), 1.8
+end
+
+-- Small details that make visitors of the same body plan look different.
+local FEATURES: { [string]: (Adder, Color3, Color3) -> () } = {
+	crest = function(add, _body, accent)
+		add("Crest", nil, Vector3.new(0.3, 1, 1.2), CFrame.new(0, 2.6, -1.4), accent)
+	end,
+	horns = function(add, _body, accent)
+		for _, side in ipairs({ -1, 1 }) do
+			add(
+				"Horn",
+				nil,
+				Vector3.new(0.25, 0.9, 0.25),
+				CFrame.new(side * 0.5, 2.3, -1.8) * CFrame.Angles(0, 0, math.rad(-side * 20)),
+				accent:Lerp(WHITE, 0.5)
+			)
+		end
+	end,
+	antennae = function(add, _body, accent)
+		for _, side in ipairs({ -1, 1 }) do
+			add(
+				"Antenna",
+				nil,
+				Vector3.new(0.12, 1.4, 0.12),
+				CFrame.new(side * 0.35, 1.8, -1.8) * CFrame.Angles(math.rad(-20), 0, math.rad(-side * 20)),
+				accent
+			)
+		end
+	end,
+	spots = function(add, _body, accent)
+		for i = 1, 3 do
+			add(
+				"Spot",
+				Enum.PartType.Ball,
+				Vector3.new(0.6, 0.6, 0.6),
+				CFrame.new((i - 2) * 0.7, 1.25, (i % 2) * 0.6 - 0.2),
+				accent:Lerp(WHITE, 0.3)
+			)
+		end
+	end,
+	fluff = function(add, body, _accent)
+		add("Fluff", Enum.PartType.Ball, Vector3.new(1.4, 1.1, 1.4), CFrame.new(0, 1.4, 0.4), body:Lerp(WHITE, 0.6))
+	end,
+	glow = function(add, _body, accent)
+		local orb = add("Glow", Enum.PartType.Ball, Vector3.new(0.6, 0.6, 0.6), CFrame.new(0, 2.4, -0.6), accent)
+		orb.Material = Enum.Material.Neon
+	end,
+	whiskers = function(add, _body, _accent)
+		for _, side in ipairs({ -1, 1 }) do
+			add("Whisker", nil, Vector3.new(1.2, 0.06, 0.06), CFrame.new(side * 0.9, 0.9, -2.8), WHITE)
+		end
+	end,
+}
+
 local function bodySpec(archetype: string): (Enum.PartType, Vector3, Vector3)
 	if archetype == "hopper" then
 		return Enum.PartType.Ball, Vector3.new(3, 3, 3), Vector3.zero
@@ -187,6 +289,14 @@ local function bodySpec(archetype: string): (Enum.PartType, Vector3, Vector3)
 		return Enum.PartType.Block, Vector3.new(2, 2, 3.6), Vector3.zero
 	elseif archetype == "otter" then
 		return Enum.PartType.Ball, Vector3.new(2.4, 2.2, 4.4), Vector3.zero
+	elseif archetype == "frog" then
+		return Enum.PartType.Ball, Vector3.new(3, 2, 3), Vector3.zero
+	elseif archetype == "snail" then
+		return Enum.PartType.Block, Vector3.new(1.6, 0.8, 3.6), Vector3.zero
+	elseif archetype == "moth" then
+		return Enum.PartType.Ball, Vector3.new(1.4, 1.4, 2.8), Vector3.zero
+	elseif archetype == "boar" then
+		return Enum.PartType.Ball, Vector3.new(2.8, 2.4, 3.8), Vector3.zero
 	else
 		return Enum.PartType.Ball, Vector3.new(4, 2, 3), Vector3.zero
 	end
@@ -253,6 +363,10 @@ function AnimalFactory.build(species: any, animalId: string): Built
 		return newPart(model, name, partShape, partSize * scale, scaled, color)
 	end
 	local mouth, halfHeight = ARCHETYPES[species.Archetype](add, bodyColor, accentColor)
+	local feature = species.Feature and FEATURES[species.Feature]
+	if feature then
+		feature(add, bodyColor, accentColor)
+	end
 	-- Re-centre so the root's CFrame is the model origin (body may be offset for tortoises).
 	if offset.Magnitude > 0 then
 		for _, child in ipairs(model:GetChildren()) do

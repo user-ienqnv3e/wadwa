@@ -152,7 +152,8 @@ test("server boots from the place file without runtime errors", function()
 	noFailures(engine)
 	truthy(engine.workspace:FindFirstChild("WildFeastAnimals"), "animals folder")
 	truthy(engine.workspace:FindFirstChild("WildFeastGiant"), "giant")
-	eq(#engine:service("AnimalService").getAnimals(), 19, "animal count")
+	-- 19 residents + 2 rotating visitor slots on each of the 3 islands (expansion roster).
+	eq(#engine:service("AnimalService").getAnimals(), 25, "animal count")
 	local ready = table.concat(engine.prints, "\n")
 	truthy(string.find(ready, "persistence: DataStore", 1, true), "ready message: " .. ready)
 end)
@@ -1145,6 +1146,155 @@ test("repeated feast cycles stay bounded and pay once per cycle", function()
 	eq(profile.stats.feastsCompleted, cycles, "one completion per cycle")
 	eq(profile.stats.feastsJoined, cycles, "one join per cycle")
 	truthy(#engine.workspace.WildFeastGroundFood:GetChildren() <= Config.Caps.GroundFoodGlobal, "ground food bounded")
+	noFailures(engine)
+end)
+
+--------------------------------------------------------------------------------
+print("Expansion: kitchen, lures & visitors, quests, decorations, upgrades (end to end)")
+test("cook a recipe, call a visitor with its lure, feed it, and claim its quest once", function()
+	local engine = boot()
+	local player = join(engine, 901)
+	local profile = profileOf(engine, player)
+	local Config = engine.config
+	profile.coins, profile.research = 5000, 30
+	-- Learn + prepare Dewberry in the Pantry, then cook Dewberry Jam through the remote.
+	engine:fireServer(player, "Action", { kind = "UnlockFood", id = "dewberry" })
+	engine:advance(0.3)
+	truthy(profile.unlockedFoods.dewberry, "dewberry learned")
+	engine:fireServer(player, "Action", { kind = "Cook", id = "cook_dewberry_jam", expect = 0 })
+	engine:fireServer(player, "Action", { kind = "Cook", id = "cook_dewberry_jam", expect = 0 }) -- double tap
+	engine:advance(0.3)
+	eq(profile.cooked.cook_dewberry_jam, 1, "cooked once")
+	truthy((profile.inventory.dewberry_jam or 0) >= 3, "jam made")
+	-- Make and use a Dewhop lure.
+	profile.inventory.dewberry = 10
+	profile.unlockedFoods.field_pea, profile.inventory.field_pea = true, 5
+	engine:fireServer(player, "Action", { kind = "Cook", id = "lure_dewhop", expect = 0 })
+	engine:advance(0.3)
+	eq(profile.lures.dewhop, 1, "lure made")
+	-- Dewhop starts in a meadow visitor slot, so the lure is kept ("already visiting").
+	engine:fireServer(player, "Action", { kind = "UseLure", id = "dewhop" })
+	engine:advance(0.5)
+	eq(profile.lures.dewhop, 1, "already visiting: lure kept")
+	-- A visitor that is not around is called in by its lure, replacing the oldest slot.
+	profile.lures.croakle = 1
+	engine:fireServer(player, "Action", { kind = "UseLure", id = "croakle" })
+	engine:advance(0.5)
+	eq(profile.lures.croakle, nil, "croakle lure used")
+	eq(profile.stats.luresUsed, 1, "counted")
+	local dewhop, croakle
+	for _, a in ipairs(engine:service("AnimalService").getAnimals()) do
+		if a.species.Id == "dewhop" then
+			dewhop = a
+		elseif a.species.Id == "croakle" then
+			croakle = a
+		end
+	end
+	truthy(croakle, "croakle arrived")
+	eq(#engine:service("AnimalService").getAnimals(), 25, "no extra animals spawned")
+	-- Feed it its favourite (Field Pea) through a real throw.
+	parkOthers(engine, croakle)
+	croakle.home = Vector3.new(10, 0, -30)
+	croakle.pos, croakle.moveTarget, croakle.nextWander = croakle.home, croakle.home, math.huge
+	engine:fireServer(player, "Action", { kind = "SelectFood", id = "field_pea" })
+	stand(engine, player, Vector3.new(10, 9, -21), croakle.home)
+	engine:advance(1)
+	for _ = 1, 4 do
+		throwAt(engine, player, engine:service("AnimalService").mouthPosition(croakle), 0.4, "field_pea")
+		engine:advance(3.5)
+	end
+	noFailures(engine)
+	truthy((profile.fedCount.croakle or 0) >= 2, "fed the visitor, got " .. tostring(profile.fedCount.croakle))
+	eq(profile.discoveries.croakle.field_pea, true, "favourite discovered")
+	eq(dewhop, nil, "the lure replaced the slot that had shown its visitor longest")
+	local coins = profile.coins
+	engine:fireServer(player, "Action", { kind = "ClaimQuest", id = "visit_croakle" })
+	engine:fireServer(player, "Action", { kind = "ClaimQuest", id = "visit_croakle" })
+	engine:advance(0.5)
+	eq(profile.questsClaimed.visit_croakle, true, "claimed")
+	local paid = profile.coins - coins
+	eq(paid, Config.Quests.visit_croakle.Reward.Coins, "paid exactly once")
+end)
+
+test("decorations: buy once per tap, place on own island only, remove; upgrades need prerequisites", function()
+	local engine = boot()
+	local player = join(engine, 902)
+	local profile = profileOf(engine, player)
+	profile.coins, profile.research = 5000, 30
+	engine:fireServer(player, "Action", { kind = "BuyDecor", id = "daisy_lantern", expect = 0 })
+	engine:fireServer(player, "Action", { kind = "BuyDecor", id = "daisy_lantern", expect = 0 })
+	engine:advance(0.3)
+	eq(profile.decorOwned.daisy_lantern, 1, "bought once")
+	engine:fireServer(player, "Action", { kind = "PlaceDecor", id = "daisy_lantern", habitat = "grove", slot = 1 })
+	engine:fireServer(player, "Action", { kind = "PlaceDecor", id = "daisy_lantern", habitat = "meadow", slot = 99 })
+	engine:advance(0.3)
+	eq(next(profile.decorPlaced), nil, "refused")
+	engine:fireServer(player, "Action", { kind = "PlaceDecor", id = "daisy_lantern", habitat = "meadow", slot = 2 })
+	engine:advance(0.3)
+	eq(profile.decorPlaced.meadow.p2, "daisy_lantern", "placed")
+	engine:fireServer(player, "Action", { kind = "RemoveDecor", habitat = "meadow", slot = 2 })
+	engine:advance(0.3)
+	eq(profile.decorPlaced.meadow, nil, "removed")
+	engine:fireServer(player, "Action", { kind = "BuyUpgrade", id = "patron_hopper", expect = 0 })
+	engine:advance(0.3)
+	eq(profile.upgrades.patron_hopper, nil, "prerequisite enforced by the server")
+	engine:fireServer(player, "Action", { kind = "BuyUpgrade", id = "rapport_hopper", expect = 0 })
+	engine:advance(0.3)
+	eq(profile.upgrades.rapport_hopper, 1, "root upgrade bought")
+	noFailures(engine)
+end)
+
+test("hostile expansion payloads never error, never pay and never change state", function()
+	local engine = boot()
+	local player = join(engine, 903)
+	local profile = profileOf(engine, player)
+	local before = engine.deepCopy(profile)
+	local NaN = 0 / 0
+	local payloads = {
+		{ kind = "Cook", id = "cook_dewberry_jam", expect = NaN },
+		{ kind = "Cook", id = string.rep("x", 200) },
+		{ kind = "Cook", id = 5, expect = 0 },
+		{ kind = "ClaimQuest", id = "feeds_8" },
+		{ kind = "ClaimQuest", id = "not_a_quest" },
+		{ kind = "BuyDecor", id = "golden_goose_statue", expect = 0 },
+		{ kind = "PlaceDecor", id = "daisy_lantern", habitat = "meadow", slot = 1 },
+		{ kind = "PlaceDecor", id = "daisy_lantern", habitat = "meadow", slot = 1.5 },
+		{ kind = "RemoveDecor", habitat = "meadow", slot = 1 },
+		{ kind = "UseLure", id = "dewhop" },
+		{ kind = "UseLure", id = "puffhop" },
+		{ kind = "PinFood", id = "sunberry" },
+		{ kind = "PinFood", id = "mango" },
+	}
+	for _, payload in ipairs(payloads) do
+		engine:fireServer(player, "Action", payload)
+		engine:advance(0.2)
+	end
+	noFailures(engine)
+	eq(profile.coins, before.coins, "coins")
+	eq(next(profile.questsClaimed), nil, "no quest")
+	eq(next(profile.decorOwned), nil, "no decor")
+	eq(next(profile.cooked), nil, "no cook")
+	eq(#profile.pinned, 0, "no pin")
+end)
+
+test("visitor slots rotate over time without ever exceeding the animal cap", function()
+	local engine = boot()
+	local slots = engine:service("AnimalService").visitorSlots()
+	eq(#slots, 6, "two per island")
+	local seen = {}
+	for _ = 1, 8 do
+		for _, a in ipairs(slots) do
+			seen[a.species.Id] = true
+			truthy(a.species.Visitor and a.species.Habitat == a.habitat.Id, "visitor on its own island")
+		end
+		engine:advance(engine.config.Visitors.RotateSeconds + 2)
+		truthy(#engine:service("AnimalService").getAnimals() <= engine.config.Animal.MaxActive, "cap")
+	end
+	local n = 0
+	for _ in pairs(seen) do
+		n += 1
+	end
+	truthy(n >= 30, "rotation showed " .. n .. " different visitors")
 	noFailures(engine)
 end)
 

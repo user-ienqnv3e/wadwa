@@ -235,6 +235,14 @@ local function onReachFood(animal: AnimalService.Animal, food: AnimalService.Gro
 	resolveFeed(owner, animal, foodId, "Ground", nil, position)
 end
 
+local function catchBonus(profile: any, animal: AnimalService.Animal): number
+	if not profile then
+		return 1
+	end
+	local pct = Economy.modifier(Config, profile, "catchArchetype", animal.species.Archetype)
+	return 1 + math.min(pct, Config.Bonus.MaxCatchPct) / 100
+end
+
 local function endProjectile(index: number, kind: string, position: Vector3)
 	local projectile = projectiles[index]
 	table.remove(projectiles, index)
@@ -374,7 +382,9 @@ local function stepProjectiles(dt: number)
 			end
 		end
 
-		-- 2) Animals: a mouth catch is "Perfect", touching the body is "Good".
+		-- 2) Animals: a mouth catch is "Perfect", touching the body is "Good". The thrower's
+		-- Mouth Reading upgrades widen the mouth of that body plan for their own throws only.
+		local ownerProfile = deps.getProfile(projectile.owner)
 		local best: AnimalService.Animal? = nil
 		local bestQuality = ""
 		local bestDist = math.huge
@@ -386,7 +396,7 @@ local function stepProjectiles(dt: number)
 					local bodyDist, bodyT = Trajectory.closestOnSegment(a, b, body)
 					if
 						mouthT <= reach + 1e-3
-						and mouthDist <= AnimalService.catchRadius(animal) + Config.Throw.ProjectileRadius
+						and mouthDist <= AnimalService.catchRadius(animal) * catchBonus(ownerProfile, animal) + Config.Throw.ProjectileRadius
 						and mouthDist < bestDist
 					then
 						best, bestQuality, bestDist = animal, "Perfect", mouthDist

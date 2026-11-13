@@ -48,6 +48,7 @@ ActionService.init({
 	markDirty = markDirty,
 	notify = notify,
 	ringBell = FeastService.ringFromPlayer,
+	summon = AnimalService.summon,
 })
 SafetyService.init({ getProfile = getProfile, notify = notify })
 

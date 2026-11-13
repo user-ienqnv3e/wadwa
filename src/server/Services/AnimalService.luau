@@ -50,6 +50,8 @@ export type Animal = {
 	bestDistance: number,
 	lastProgressAt: number,
 	phase: number,
+	-- visitor slots only
+	slot: { habitat: string, index: number, cursor: number, since: number, luredUntil: number, lockedUntil: number }?,
 }
 
 type Deps = {
@@ -396,6 +398,95 @@ local function spotSpecies()
 	end
 end
 
+--------------------------------------------------------------------------------
+-- Visitor slots: a few per island. Each slot shows one visiting species at a time and rotates
+-- through that island's visitors; a lure takes over the slot that has shown its visitor longest
+-- (never one that was lured moments ago). Only SlotsPerHabitat x islands visitor models exist.
+--------------------------------------------------------------------------------
+local visitorPools: { [string]: { string } } = {}
+local visitorSlots: { Animal } = {}
+
+local function randomHome(habitat: any): Vector3
+	local center = habitatCenter(habitat)
+	local angle = random:NextNumber(0, math.pi * 2)
+	local dist = random:NextNumber(0.25, 0.6) * habitat.Radius
+	return center + Vector3.new(math.cos(angle) * dist, 0, math.sin(angle) * dist)
+end
+
+local function showSpecies(animal: Animal, speciesId: string)
+	releaseFood(animal)
+	pcall(function()
+		animal.model:Destroy()
+	end)
+	animal.species = Config.Species[speciesId]
+	animal.home = randomHome(animal.habitat)
+	animal.pos = clampToIsland(animal, animal.home)
+	animal.moveTarget = nil
+	spawnModel(animal)
+	animal.model:SetAttribute("Visitor", true)
+	setState(animal, "Idle")
+end
+
+function AnimalService.visitorSlots(): { Animal }
+	return visitorSlots
+end
+
+-- Calls a visitor to its island. Returns (ok, message); the caller consumes the lure on success.
+function AnimalService.summon(speciesId: string, _player: Player?): (boolean, string)
+	local species = Config.Species[speciesId]
+	if not species or not species.Visitor then
+		return false, "Unknown visitor."
+	end
+	local now = os.clock()
+	local candidate: Animal? = nil
+	for _, animal in ipairs(visitorSlots) do
+		local slot = animal.slot :: any
+		if slot.habitat == species.Habitat then
+			if animal.species.Id == speciesId then
+				slot.luredUntil = math.max(slot.luredUntil, now + Config.Visitors.LuredStaySeconds)
+				return false, species.Name .. " is already visiting " .. animal.habitat.Name .. ". Go say hi!"
+			end
+			if now >= slot.lockedUntil and (candidate == nil or slot.since < (candidate.slot :: any).since) then
+				candidate = animal
+			end
+		end
+	end
+	if not candidate then
+		return false, "Every visitor spot there was just filled by a lure. Try again in a moment."
+	end
+	local slot = candidate.slot :: any
+	showSpecies(candidate, speciesId)
+	slot.since = now
+	slot.luredUntil = now + Config.Visitors.LuredStaySeconds
+	slot.lockedUntil = now + Config.Visitors.LureLockSeconds
+	return true, string.format("A %s is on its way to %s!", species.Name, Config.Habitats[species.Habitat].Name)
+end
+
+local function rotateVisitors(now: number)
+	for _, animal in ipairs(visitorSlots) do
+		local slot = animal.slot :: any
+		if now >= slot.luredUntil and now - slot.since >= Config.Visitors.RotateSeconds and animal.state ~= "Eat" then
+			local pool = visitorPools[slot.habitat]
+			-- Skip species already shown by the island's other slot.
+			for _ = 1, #pool do
+				slot.cursor = slot.cursor % #pool + 1
+				local candidate = pool[slot.cursor]
+				local taken = false
+				for _, other in ipairs(visitorSlots) do
+					if other ~= animal and other.species.Id == candidate then
+						taken = true
+					end
+				end
+				if not taken then
+					showSpecies(animal, candidate)
+					break
+				end
+			end
+			slot.since = now
+		end
+	end
+end
+
 function AnimalService.init(dependencies: Deps)
 	deps = dependencies
 	local existing = workspace:FindFirstChild("WildFeastAnimals")
@@ -460,6 +551,56 @@ function AnimalService.init(dependencies: Deps)
 		end
 	end
 
+	-- Visitor slots (bounded by SlotsPerHabitat x islands and the global MaxActive cap).
+	for _, speciesId in ipairs(Config.VisitorOrder) do
+		local habitatId = Config.Species[speciesId].Habitat
+		visitorPools[habitatId] = visitorPools[habitatId] or {}
+		table.insert(visitorPools[habitatId], speciesId)
+	end
+	for _, habitatId in ipairs(Config.HabitatOrder) do
+		local pool = visitorPools[habitatId]
+		for index = 1, if pool then Config.Visitors.SlotsPerHabitat else 0 do
+			if #animals >= Config.Animal.MaxActive then
+				break
+			end
+			local cursor = ((index - 1) * math.floor(#pool / Config.Visitors.SlotsPerHabitat)) % #pool + 1
+			local habitat = Config.Habitats[habitatId]
+			local home = randomHome(habitat)
+			local animal: Animal = {
+				id = "visitor_" .. habitatId .. "_" .. index,
+				species = Config.Species[pool[cursor]],
+				habitat = habitat,
+				model = nil :: any,
+				root = nil :: any,
+				emote = nil :: any,
+				mouthOffset = Vector3.zero,
+				halfHeight = 1,
+				home = home,
+				wanderRadius = 16,
+				pos = home,
+				yaw = random:NextNumber(0, math.pi * 2),
+				state = "Idle",
+				stateStarted = 0,
+				stateEnds = math.huge,
+				nextState = nil,
+				moveTarget = nil,
+				nextWander = 0,
+				food = nil,
+				lookAt = nil,
+				bestDistance = math.huge,
+				lastProgressAt = 0,
+				phase = random:NextNumber(0, 10),
+				slot = { habitat = habitatId, index = index, cursor = cursor, since = os.clock(), luredUntil = 0, lockedUntil = 0 },
+			}
+			spawnModel(animal)
+			animal.model:SetAttribute("Visitor", true)
+			animal.pos = clampToIsland(animal, home)
+			table.insert(animals, animal)
+			table.insert(visitorSlots, animal)
+			setState(animal, "Idle")
+		end
+	end
+
 	local thinkAccumulator = 0
 	local spotAccumulator = 0
 	RunService.Heartbeat:Connect(function(dt)
@@ -483,6 +624,7 @@ function AnimalService.init(dependencies: Deps)
 		if spotAccumulator >= 1 then
 			spotAccumulator = 0
 			spotSpecies()
+			Guard.run("Visitor rotation", rotateVisitors, now)
 		end
 	end)
 end
