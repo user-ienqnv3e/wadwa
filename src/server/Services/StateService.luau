@@ -167,10 +167,18 @@ function StateService.init()
 	end)
 	RunService.Heartbeat:Connect(function()
 		local now = os.clock()
+		-- Stable order (by UserId) so identical sessions replay identically.
+		local due = {}
 		for player in pairs(dirty) do
 			if now - (lastPush[player] or 0) >= Config.Remote.StatePushInterval then
-				push(player)
+				table.insert(due, player)
 			end
+		end
+		table.sort(due, function(a, b)
+			return a.UserId < b.UserId
+		end)
+		for _, player in ipairs(due) do
+			push(player)
 		end
 	end)
 end

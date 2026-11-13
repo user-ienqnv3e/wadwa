@@ -62,6 +62,20 @@ local function deepCopy(value: any): any
 	return copy
 end
 
+-- Sessions in a stable order (by UserId). Iterating the map directly follows memory addresses,
+-- which made the order of concurrent autosave/shutdown saves (and so which save meets a DataStore
+-- error first) differ between otherwise identical runs.
+local function orderedPlayers(): { Player }
+	local list = {}
+	for player in pairs(sessions) do
+		table.insert(list, player)
+	end
+	table.sort(list, function(a, b)
+		return a.UserId < b.UserId
+	end)
+	return list
+end
+
 local function keyFor(player: Player): string
 	return Config.Data.KeyPrefix .. tostring(player.UserId)
 end
@@ -373,7 +387,7 @@ function DataService.init()
 	task.spawn(function()
 		while not shuttingDown do
 			task.wait(Config.Data.AutosaveInterval)
-			for player in pairs(sessions) do
+			for _, player in ipairs(orderedPlayers()) do
 				task.spawn(DataService.save, player, false)
 			end
 		end
@@ -382,7 +396,7 @@ function DataService.init()
 	game:BindToClose(function()
 		shuttingDown = true
 		local pending = 0
-		for player in pairs(sessions) do
+		for _, player in ipairs(orderedPlayers()) do
 			pending += 1
 			task.spawn(function()
 				DataService.save(player, true)

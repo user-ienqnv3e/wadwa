@@ -1565,6 +1565,65 @@ test("while a resync waits out its throttle, ordinary changes still arrive promp
 	noFailures(engine)
 end)
 
+print("Fuzz reproducibility regressions")
+test("identical sessions replay identically: which autosaves meet a DataStore outage is deterministic", function()
+	-- Saves used to be issued in memory-address order, so the same inputs failed different players'
+	-- saves from run to run and a failing fuzz seed could not be replayed.
+	local outcomes = {}
+	for _ = 1, 6 do
+		local engine = Engine.new({ place = PLACE })
+		engine:startServer()
+		local list = {}
+		for i = 1, 5 do
+			list[i] = engine:addPlayer(7000 + i)
+		end
+		engine:advance(2)
+		engine.backend.failNext = 2
+		engine:advance(125)
+		local failedKeys = {}
+		for _, w in ipairs(engine.warnings) do
+			local key = string.match(w, "Save attempt 1 failed for (player_%d+)")
+			if key then
+				table.insert(failedKeys, key)
+			end
+		end
+		table.sort(failedKeys)
+		outcomes[table.concat(failedKeys, ",")] = true
+		noFailures(engine)
+	end
+	local n = 0
+	for _ in pairs(outcomes) do
+		n += 1
+	end
+	eq(n, 1, "distinct outcomes for identical inputs")
+end)
+
+test("a freed decoration lane goes to the player who has waited longest", function()
+	local engine = boot()
+	local Config = engine.config
+	local DecorService = engine:service("DecorService")
+	local function gardener(userId)
+		local p = join(engine, userId)
+		local profile = profileOf(engine, p)
+		profile.decorOwned.daisy_lantern = 1
+		profile.decorPlaced.meadow = { p1 = "daisy_lantern" }
+		DecorService.sync(p)
+		return p
+	end
+	local drawn = {}
+	for i = 1, Config.Decor.Lanes do
+		drawn[i] = gardener(9700 + i)
+	end
+	local first = gardener(9799) -- waits first (higher UserId on purpose)
+	engine:advance(1)
+	local second = gardener(9750)
+	engine:removePlayer(drawn[1])
+	engine:advance(1)
+	truthy(DecorService.laneOf(first), "longest waiter drawn")
+	eq(DecorService.laneOf(second), nil, "later waiter still waiting")
+	noFailures(engine)
+end)
+
 print(string.format("\n%d passed, %d failed", passed, failed))
 if failed > 0 then
 	process.exit(1)

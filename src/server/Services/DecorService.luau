@@ -31,6 +31,7 @@ local laneOf: { [Player]: number } = {}
 -- player -> "habitat:slot" -> { id, model }
 local shown: { [Player]: { [string]: { id: string, model: Model } } } = {}
 local folders: { [Player]: Folder } = {}
+local waitingSince: { [Player]: number } = {} -- players with placements but no lane yet
 
 local function maxPlots(): number
 	local extra = 0
@@ -59,6 +60,7 @@ local function release(player: Player)
 		entry.model:Destroy()
 	end
 	shown[player] = nil
+	waitingSince[player] = nil
 	if folders[player] then
 		folders[player]:Destroy()
 		folders[player] = nil
@@ -69,11 +71,21 @@ local function release(player: Player)
 		laneOf[player] = nil
 		-- Hand the freed lane to someone who was waiting for one (deferred: we may be inside the
 		-- PlayerRemoving handler).
-		for waiting, entries in pairs(shown) do
-			if laneOf[waiting] == nil and next(entries) == nil and waiting ~= player then
-				task.defer(DecorService.sync, waiting)
-				break
+		-- The player who has waited longest gets it (ties by UserId), never an arbitrary one.
+		local best: Player? = nil
+		for waiting in pairs(waitingSince) do
+			if waiting ~= player and laneOf[waiting] == nil then
+				if
+					best == nil
+					or waitingSince[waiting] < waitingSince[best]
+					or (waitingSince[waiting] == waitingSince[best] and waiting.UserId < best.UserId)
+				then
+					best = waiting
+				end
 			end
+		end
+		if best then
+			task.defer(DecorService.sync, best)
 		end
 	end
 end
@@ -122,6 +134,9 @@ function DecorService.sync(player: Player)
 	end
 	local lane = assignLane(player)
 	if not lane then
+		if not waitingSince[player] then
+			waitingSince[player] = os.clock()
+		end
 		if not shown[player] then
 			shown[player] = {}
 			deps.notify(player, "The island is busy: your decorations still work but aren't shown in this server.", "info")
@@ -129,6 +144,7 @@ function DecorService.sync(player: Player)
 		return
 	end
 	shown[player] = current
+	waitingSince[player] = nil
 	local folder: Folder = folders[player]
 	if not folder then
 		local created = Instance.new("Folder")
