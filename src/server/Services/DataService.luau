@@ -29,6 +29,7 @@ export type Session = {
 	saving: boolean,
 	released: boolean,
 	lastSaved: number,
+	ownsLock: boolean, -- this server wrote its session lock into the stored record
 }
 
 local DataService = {}
@@ -41,6 +42,10 @@ local storeMode: "DataStore" | "StudioMemory" = "DataStore"
 local memoryStore: { [string]: any } = {} -- Studio-only fallback, lives as long as this server
 local jobId = if game.JobId ~= "" then game.JobId else "studio-" .. tostring(math.random(1, 1e9))
 local shuttingDown = false
+-- Keys whose final (releasing) save is still running on this server. A quick rejoin must wait for
+-- it: loading earlier would read stale data while still seeing *our* lock, and the late release
+-- would then strip the new session's lock and push it into unsaved mode.
+local releasing: { [string]: boolean } = {}
 
 local function deepCopy(value: any): any
 	if type(value) ~= "table" then
@@ -122,8 +127,30 @@ local function loadRecord(key: string): (any, string?)
 	return nil, lastReason
 end
 
+-- Clears this server's lock on a record without touching the profile (used when a session never
+-- saved, e.g. the stored data was from a newer schema, so the next server can load at once).
+local function releaseLockOnly(key: string)
+	local dataStore = store
+	if storeMode ~= "DataStore" or not dataStore then
+		return
+	end
+	pcall(function()
+		dataStore:UpdateAsync(key, function(r: any)
+			if SaveSchema.evaluateLock(r, jobId, os.time(), Config.Data.SessionLockTimeout) == "ours" then
+				r.lock = nil
+				return r
+			end
+			return nil
+		end)
+	end)
+end
+
 local function writeRecord(session: Session, release: boolean): boolean
 	if session.mode == "Unsaved" then
+		if release and session.ownsLock then
+			session.ownsLock = false
+			releaseLockOnly(session.key)
+		end
 		return false
 	end
 	local snapshot = deepCopy(session.profile)
@@ -156,7 +183,11 @@ local function writeRecord(session: Session, release: boolean): boolean
 			warn("[WildFeast] Session lock lost for " .. session.key .. "; switching to unsaved mode.")
 			session.mode = "Unsaved"
 			session.modeReason = "lock_lost"
+			session.ownsLock = false
 			return false
+		end
+		if ok and release then
+			session.ownsLock = false
 		end
 		if ok then
 			session.lastSaved = os.clock()
@@ -193,19 +224,20 @@ end
 
 local function onPlayerAdded(player: Player)
 	local key = keyFor(player)
-	local record, reason = loadRecord(key)
+	local record: any, reason: string? = nil, nil
+	local deadline = os.clock() + Config.Data.ReleaseWait
+	while releasing[key] and os.clock() < deadline and player:IsDescendantOf(Players) do
+		task.wait(0.1)
+	end
+	if releasing[key] then
+		reason = "previous_session_still_saving"
+	else
+		record, reason = loadRecord(key)
+	end
 	if not player:IsDescendantOf(Players) then
 		-- Left while loading: release the lock we may have just taken without touching the profile.
-		if record and storeMode == "DataStore" and store then
-			pcall(function()
-				(store :: DataStore):UpdateAsync(key, function(r: any)
-					if SaveSchema.evaluateLock(r, jobId, os.time(), Config.Data.SessionLockTimeout) == "ours" then
-						r.lock = nil
-						return r
-					end
-					return nil
-				end)
-			end)
+		if record then
+			releaseLockOnly(key)
 		end
 		return
 	end
@@ -236,6 +268,7 @@ local function onPlayerAdded(player: Player)
 		saving = false,
 		released = false,
 		lastSaved = os.clock(),
+		ownsLock = record ~= nil and storeMode == "DataStore",
 	}
 	sessions[player] = session
 	player:SetAttribute("PersistenceMode", mode)
@@ -252,7 +285,9 @@ local function onPlayerRemoving(player: Player)
 	for _, callback in ipairs(releasingCallbacks) do
 		pcall(callback, player, session)
 	end
+	releasing[session.key] = true
 	DataService.save(player, true)
+	releasing[session.key] = nil
 	sessions[player] = nil
 end
 

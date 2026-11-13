@@ -42,40 +42,46 @@ src/client   (StarterPlayerScripts.Client) Store, ThrowController, Effects, Worl
 Tools are pinned in `mise.toml` (Rojo 7.7.1, Lune 0.11.1, luau-lsp, selene, StyLua).
 
 ```sh
-./scripts/build.sh          # rojo build -> lune bake world -> lune reopen & verify WildFeastIslands.rbxl
-lune run tests/run.luau     # 27 offline tests of the rules, validation, persistence, feast and builders
+./scripts/build.sh               # rojo build -> lune bake world -> lune reopen & verify WildFeastIslands.rbxl
+lune run tests/run.luau          # 28 unit tests: rules, validation, persistence schema, feast, builders
+lune run tests/integration.luau  # 27 server scenarios run from the built place file in the simulator
+lune run tests/client.luau       # 15 client+server scenarios (input, menus, layout arithmetic)
 rojo sourcemap -o sourcemap.json && luau-lsp analyze --definitions=<roblox globalTypes.d.luau> --sourcemap=sourcemap.json src
 selene src && stylua --check src tests scripts
 ```
 
 For live development, run `rojo serve`. The server rebuilds the world when the baked folder is missing.
 
+### The offline engine simulator
+
+`tests/sim/Engine.luau` and `tests/sim/Client.luau` load the **real scripts from the built `.rbxl`** and run them against hand-written stand-ins: a virtual clock and `task` scheduler, fake `Players`/`RunService`/`DataStoreService` (with latency and failure injection, shared between "servers"), RemoteEvents that copy arguments and add latency, a ray-vs-part `Raycast`, `ProximityPrompt`/button signals and fake input objects. **It is not Roblox.** Physics, replication, rendering, the GUI layout engine, the default touch controls, real networking and real DataStore behaviour are not simulated. The layout checks are arithmetic on the HUD's own offset sizes, so they are not screenshots. Two harness-only shims exist because Lune differs from the engine: `Position` is mirrored from `CFrame` for moving parts, and client `X.Adornee = nil` assignments are rewritten (the place file is untouched).
+
 ## Verification status
 
 **Performed (offline, outside Roblox Studio):**
 - `luau-lsp analyze` in `--!strict` against the Roblox API definitions: 0 errors. selene: 0 errors. StyLua check passes.
-- 27 Lune tests pass. They cover:
-  - 15 kinds of invalid throws (wrong types, NaN/inf, out-of-range power or pitch, unknown food), all rejected.
-  - Onboarding: the first upgrade comes after 4 ground feeds.
-  - All 3 zones, every recipe, upgrade and restoration are reachable by simulated play without spending money.
-  - Disliked food pays nothing. Free food is unlimited.
-  - Corrupt-save sanitising, the v1→v2 migration, refusing newer schemas, and session-lock states.
-  - Feast: the solo goal is reachable; two-player rewards are paid once per contributor and capped, with a consolation reward on failure.
-  - One player's feeding leaves other profiles unchanged.
-  - The rate limiter.
-  - The world builds with bridges linking the meadow to both islands, and rebuilds deterministically.
-  - All animal models are welded single-root assemblies.
-- `WildFeastIslands.rbxl` was reopened with Lune: it has the binary `<roblox!` header, the scripts (whose source matches the repo), 6 remotes, and 678 baked world parts.
+- 28 unit tests, 27 server integration scenarios and 15 client scenarios pass. The scenarios cover:
+  - Boot from the place file, join and state push.
+  - Tutorial catch, ground feeding and edge-of-island feeding.
+  - Gates, origin tolerance, spam caps, death/respawn/leave cleanup.
+  - Stuck recovery, model rebuild, long-run island bounds.
+  - Solo, three-player and timed-out feasts with single payment.
+  - Save/rejoin, a quick rejoin during a retried save, foreign locks, newer schemas, an outage at join, shutdown and Studio memory mode.
+  - Hostile payloads, sea rescue and locked-island bounce.
+  - On the client: every tab with new and advanced profiles, keyboard/touch/gamepad throws, slide-off and cancelled touches, respawn while charging, the pantry prompt, buying through the UI, no rebuild on identical pushes, the bell button, and HUD overlap at 667×375, 844×390, 1024×768 and 1366×768.
+- `WildFeastIslands.rbxl` was rebuilt and reopened with Lune. It has the binary `<roblox!` header, script sources that match the repo, 6 remotes and 678 baked world parts.
 
-**Not verified (needs Roblox Studio / live servers, which weren't available here):**
-- Actual play sessions and Studio playtests.
-- On-screen layout on narrow touch devices.
-- Gamepad selection behaviour.
-- Two-client and reconnect behaviour in a live server.
-- DataStore behaviour under real throttling.
+**Not verified (needs Roblox Studio / devices / live servers, which weren't available here):**
+- Real Studio playtests and play sessions.
+- Real physics and character movement (gates opened locally, bridge and pier collisions, falling).
+- Actual on-screen layout with the top-bar safe insets and text wrapping.
+- The real touch jump-button position (the HUD reads it when present and falls back to PlayerModule's documented numbers).
+- Gamepad selection and navigation behaviour.
+- Two real clients and reconnects over a real network.
+- DataStore throttling and real `UpdateAsync` ordering.
 - Whether the built-in sound paths load.
-- Runtime frame and network cost.
+- Frame time and network cost.
 
-The pure rules behind these paths are unit tested, but the engine-integrated code is only type-checked. Please playtest before publishing. The game has not been published, and no purchases are configured.
+Please playtest in Studio before publishing. The game has not been published, and no purchases are configured.
 
 The game is original and only broadly inspired by casual feeding games. The reference video was not inspected, and no branding, assets or UI were copied.

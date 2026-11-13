@@ -89,12 +89,18 @@ local function habitatCenter(habitat: any): Vector3
 	return Vector3.new(habitat.Center[1], 0, habitat.Center[2])
 end
 
-local function clampToIsland(animal: Animal, p: Vector3): Vector3
+-- Furthest an animal may walk from its island centre (it still wanders within EdgeMargin; this
+-- outer limit lets it reach food anywhere on the grass).
+function AnimalService.reachRadius(habitat: any): number
+	return habitat.Radius * Config.Animal.GrassApothem - Config.Animal.ReachInset
+end
+
+local function clampToIsland(animal: Animal, p: Vector3, limit: number?): Vector3
 	local center = habitatCenter(animal.habitat)
 	local offset = flat(p) - center
-	local limit = animal.habitat.Radius - Config.Animal.EdgeMargin
-	if offset.Magnitude > limit then
-		offset = offset.Unit * limit
+	local maxDistance = limit or (animal.habitat.Radius - Config.Animal.EdgeMargin)
+	if offset.Magnitude > maxDistance then
+		offset = offset.Unit * maxDistance
 	end
 	return center + offset
 end
@@ -146,7 +152,7 @@ function AnimalService.mouthPosition(animal: Animal): Vector3
 end
 
 function AnimalService.bodyPosition(animal: Animal): Vector3
-	return animal.root.Position
+	return animal.root.CFrame.Position
 end
 
 function AnimalService.isReceptive(animal: Animal): boolean
@@ -323,7 +329,7 @@ local function move(animal: Animal, dt: number, now: number)
 		local dist = delta.Magnitude
 		if dist > 0.3 then
 			local stepLen = math.min(dist, speed * dt)
-			animal.pos = clampToIsland(animal, animal.pos + delta.Unit * stepLen)
+			animal.pos = clampToIsland(animal, animal.pos + delta.Unit * stepLen, AnimalService.reachRadius(animal.habitat))
 			desiredYaw = yawToward(Vector3.zero, delta, animal.yaw)
 			moving = true
 		end
