@@ -134,3 +134,30 @@ was rendered, physically simulated, networked for real, or played on a device.
 - luau-lsp was run against the downloaded Roblox `globalTypes.d.luau`. It found ~190 strict-mode type errors in the expansion data and Config loader (mixed-type rows, the Lune-only string require). These are fixed and the result is now **0 errors**.
 
 **Still not verified:** visual appearance and placement of decorations in a real renderer, actual replication timing, touch/gamepad feel of the paged bar, TextBox focus behaviour on real devices, real network byte counts.
+
+## QA pass 4 (expansion follow-up audit)
+
+Offline only (Lune unit/content suites plus the engine simulator on the built place). No Roblox Studio, renderer, device or real network is available on this Linux host.
+
+**Defects found and fixed.** Each has a regression that was confirmed **failing on the pre-fix build** (built from the previous commit in a worktree) and passing after the fix.
+
+| # | Defect (reproduced) | Fix | Regression |
+|---|---|---|---|
+| 1 | Any client could force a full snapshot (~18.6 KB late-game) on every `RequestState`, limited only by the action rate limiter: 30 requests in 3 s → 12 snapshots. | Snapshots answer resyncs at most every `Config.Remote.FullSnapshotInterval` (2 s). Ordinary deltas keep flowing while one waits, so joins aren't delayed. | integration: spam → ≤ 3 snapshots; changes still arrive promptly during the throttle window |
+| 2 | Lost resync: after a real gap, the client asked once. If that request was lost (or throttled), every later delta was ignored forever and the mirror froze. | The client re-asks after 3 s while it is still out of sync. | client: one State delta and the RequestState are both dropped in transit → mirror recovers |
+| 3 | A stale or duplicate full snapshot (seq ≤ last applied) replaced a newer mirror. | Snapshots are applied only when `seq > lastSeq`. | client: old seq-1 snapshot ignored |
+| 4 | Decoration lanes: a 7th player waiting for a lane was never drawn when one freed up; they had to change a placement to be drawn. | Freeing a lane hands it to a waiting player (deferred out of PlayerRemoving). | integration: waiting player drawn when a lane frees; models stay bounded |
+| 5 | `SelectFood` accepted an out-of-stock food (likelier with pins), so every throw then failed silently with `no_food`. | The server refuses with a notice and keeps the current selection. | integration: empty food refused + notice; stocked food selects |
+
+**Probed with no defect found** (now covered by tests): unpinning the selected food; the last item thrown falling back to the free food with the bar following; ◀/▶ paging wrap; a 300-character query of Lua pattern characters (plain find, clamped to 40, empty-results row); Map (a non-search tab) hiding the box and restoring the per-tab query; bar and panel surviving respawn; the rejoin garden rebuild alongside lane hand-off.
+
+**Six-player decoration limit (unchanged by design).** `Config.Decor.Lanes = 6` gardens are drawn per server.
+- **Over the limit:** a 7th player's pieces keep every gameplay effect, and they are told they aren't drawn.
+- **Handover:** they now get the next freed lane automatically.
+- **Bounds:** models never exceed 6 × 3 × 12, with ≤ 6 inert parts each. Fuzz checks the model count, the garden folder count, ownership (never more placed than owned), islands and plot ranges.
+
+**Simulator shims added:** `client.dropIncoming` / `client.dropOutgoing` drop server→client and client→server messages to test recovery. The delta tests compare against the real server profile (an independent oracle), not the harness's own merge.
+
+**Fuzz reproducibility:** extra seeds came from `os.time()` and the base wasn't printed. One batch in this pass reported a failure whose seed was lost (only the summary line was kept). The base is now printed and accepted as the 4th argument. 21 seeds at fixed base 1763047000 and a further 10 at base 1794584187, all × 250 steps, passed. That one failure is **unresolved**: its seed is unknown and it could not be reproduced in the time available.
+
+**Final evidence** (two consecutive clean full passes after the last source change): unit 34/34, content 20/20 (1,000 counts, cross-references, reachability, manifest sync, ProfileSync fuzz), server simulator 57/57, client simulator 28/28, fuzz 10 + 21 seeds, StyLua clean, selene 0 errors (6 pre-existing style warnings), luau-lsp strict 0 errors. `WildFeastIslands.rbxl` was rebuilt byte-identically twice and reopened by `verify-place` with source parity.
