@@ -25,9 +25,10 @@ There are no purchases, trading, paid randomness, prestige or forced waits. Free
 
 ```
 src/shared   (ReplicatedStorage.Shared)  Config (central economy), Economy, Validation, Trajectory,
-                                          SaveSchema, FeastRules, RateLimiter, Rng, Guard. Pure Luau, unit tested
-src/server   (ServerScriptService.Server) Main + Services: Data, State, Animal, Feeding, Feast, Action, Safety;
-                                          World/WorldBuilder + AnimalFactory (procedural parts, no assets)
+                                          SaveSchema, FeastRules, ProfileSync, RateLimiter, Rng, Guard,
+                                          Content/* (1,000 expansion items). Pure Luau, unit tested
+src/server   (ServerScriptService.Server) Main + Services: Data, State, Animal, Feeding, Feast, Action, Safety,
+                                          Decor; World/WorldBuilder + AnimalFactory + DecorFactory (procedural parts)
 src/client   (StarterPlayerScripts.Client) Store, ThrowController, Effects, WorldVisuals, Hud, Ui
 ```
 
@@ -36,6 +37,16 @@ src/client   (StarterPlayerScripts.Client) Store, ThrowController, Effects, Worl
 - **Persistence.** Profiles are versioned (schema v2 with a v1 migration). Loads use `UpdateAsync` session locks inside pcall, with bounded retries and backoff. If a load fails, the stored record is corrupt, the profile is locked elsewhere, or the save comes from a newer schema, the session runs in *Unsaved* mode: the player is told, and their data is never overwritten. Saves autosave every 120 s and save + release on leave and on `BindToClose`. In Studio without API access, the game uses an explicitly labelled **Studio memory** mode (banner shown). Live servers never fall back to memory.
 - **Per-player world.** Gates and restoration visuals are applied locally from each player's own profile. The server still enforces access: anyone found inside a locked island is moved back, and players who fall into the sea are rescued.
 - No HTTP, `loadstring`, external `require(assetId)`, model scripts or uploaded assets. The sounds are built-in `rbxasset://` engine sounds.
+
+## Expansion (v1.1)
+
+1,000 additions: 100 visiting animals, 150 foods, 200 recipes, 300 quests, 150 decorations and 100 upgrades. Each is listed with how it's acquired and how it was verified in [`docs/CONTENT_MANIFEST.md`](docs/CONTENT_MANIFEST.md).
+- **Visitors:** 2 rotating visitor slots per island; lure recipes call any visitor.
+- **Kitchen, Quests, Decor:** new tabs (K / L / H). Every catalog tab has search, a category filter and paging.
+- **Decorations:** placed pieces are drawn for everyone in the shared world.
+- **Food bar:** follows your saved pins and pages through your stocked foods.
+- **Profile updates:** one snapshot, then small sequenced deltas.
+- **Saves:** schema v3, migrated from v2.
 
 ## Building and checking
 
@@ -47,6 +58,8 @@ lune run tests/run.luau            # 34 unit tests: rules, validation, schema/mi
 lune run tests/integration.luau    # 45 server scenarios run from the built place file in the simulator
 lune run tests/client.luau         # 21 client+server scenarios (input, menus, purchases, HUD stability, layout arithmetic)
 lune run tests/fuzz.luau [place] [extraSeeds=2] [steps=250]   # seeded randomized sessions with invariants
+lune run tests/content.luau        # 1,000-item counts/ids/crossrefs/cycles, reachability bot, save v3, ProfileSync, manifest sync
+lune run scripts/manifest.luau     # regenerate docs/CONTENT_MANIFEST.md
 rojo sourcemap -o sourcemap.json && luau-lsp analyze --definitions=<roblox globalTypes.d.luau> --sourcemap=sourcemap.json src
 selene src && stylua --check src tests scripts
 ```

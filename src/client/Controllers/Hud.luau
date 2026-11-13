@@ -538,7 +538,7 @@ BUILDERS.Pantry = function(profile)
 			Parent = r,
 		})
 		Ui.label({
-			Text = food.Description .. string.format("  (%s, value ×%.1f)", Config.FoodTags[food.Tag].Name, food.Value),
+			Text = food.Description .. string.format("  (%s, value ×%.1f)", (Config.FoodTags :: any)[food.Tag].Name, food.Value),
 			TextSize = 16,
 			TextColor3 = C.Muted,
 			LayoutOrder = 2,

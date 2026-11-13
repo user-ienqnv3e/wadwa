@@ -12,6 +12,7 @@ local Economy = require("../src/shared/Economy")
 local SaveSchema = require("../src/shared/SaveSchema")
 local FeastRules = require("../src/shared/FeastRules")
 local Manifest = require("../scripts/manifest-lib")
+local ProfileSync = require("../src/shared/ProfileSync")
 
 local passed, failed = 0, 0
 local function test(name, fn)
@@ -697,6 +698,126 @@ test("every one of the 1,000 additions is obtainable by playing", function()
 	print(string.format("       (all obtained after %d rounds, %d feeds)", rounds, feeds))
 	truthy(#left == 0, #left .. " unreachable, e.g. " .. table.concat(left, ", ", 1, math.min(#left, 12)))
 	truthy(p.coins >= 0 and p.coins <= Config.Caps.Coins, "coins in range")
+end)
+
+print("Profile sync (snapshot + deltas)")
+test("seeded fuzz: applying diff(old, new) to a copy of old always yields new (nested deletions, arrays)", function()
+	local seed = 4242
+	local function rand(n)
+		seed = (seed * 1103515245 + 12345) % 2147483648
+		return seed % n + 1
+	end
+	local foods = Config.AllFoodOrder
+	local function mutate(p)
+		local r = rand(9)
+		local food = foods[rand(#foods)]
+		if r == 1 then
+			p.inventory[food] = if p.inventory[food] then nil else rand(50)
+		elseif r == 2 then
+			p.coins = rand(100000)
+		elseif r == 3 then
+			p.pinned = {}
+			for _ = 1, rand(5) - 1 do
+				table.insert(p.pinned, foods[rand(#foods)])
+			end
+		elseif r == 4 then
+			local h = Config.HabitatOrder[rand(3)]
+			p.decorPlaced[h] = p.decorPlaced[h] or {}
+			local key = "p" .. rand(12)
+			p.decorPlaced[h][key] = if p.decorPlaced[h][key] then nil else Config.DecorationOrder[rand(150)]
+			if next(p.decorPlaced[h]) == nil then
+				p.decorPlaced[h] = nil
+			end
+		elseif r == 5 then
+			local sp = Config.AllSpeciesOrder[rand(106)]
+			p.discoveries[sp] = p.discoveries[sp] or {}
+			p.discoveries[sp][food] = if p.discoveries[sp][food] then nil else true
+		elseif r == 6 then
+			p.questsClaimed[Config.QuestOrder[rand(300)]] = true
+		elseif r == 7 then
+			p.stats.totalFeeds += rand(3)
+		elseif r == 8 then
+			p.selectedFood = food
+		else
+			p.lures = {}
+		end
+	end
+	local server = SaveSchema.default(Config)
+	local client = ProfileSync.deepCopy(server)
+	for step = 1, 3000 do
+		local old = ProfileSync.deepCopy(server)
+		for _ = 1, rand(4) do
+			mutate(server)
+		end
+		local delta = ProfileSync.diff(old, server)
+		if delta then
+			-- Deltas cross a RemoteEvent: arrays must have no holes and no nil values survive.
+			ProfileSync.apply(client, serde.decode("json", serde.encode("json", delta)))
+		end
+		truthy(ProfileSync.deepEqual(client, server), "diverged at step " .. step)
+	end
+	eq(ProfileSync.diff(server, ProfileSync.deepCopy(server)), nil, "no change -> no delta")
+end)
+
+test("malformed deltas are ignored without touching unrelated state", function()
+	local p = SaveSchema.default(Config)
+	p.coins = 7
+	for _, bad in ipairs({ 5, "x", { set = 5 }, { patch = { inventory = 3 } }, { patch = { [1] = { set = {} } } }, { set = { [2] = 1 } } }) do
+		ProfileSync.apply(p, bad)
+	end
+	eq(p.coins, 7)
+	eq(type(p.inventory), "table")
+end)
+
+test("payload sizes: full snapshot vs typical deltas (JSON bytes, measured offline)", function()
+	local p = SaveSchema.default(Config)
+	p.coins, p.research = 123456, 200
+	for i, id in ipairs(Config.AllFoodOrder) do
+		p.unlockedFoods[id] = true
+		if not Config.Foods[id].Free then
+			p.inventory[id] = 50 + i
+		end
+	end
+	for _, id in ipairs(Config.AllSpeciesOrder) do
+		p.trust[id], p.fedCount[id], p.seenSpecies[id] = 90, 40, true
+	end
+	for _, id in ipairs(Config.QuestOrder) do
+		p.questsClaimed[id] = true
+	end
+	local full = #serde.encode("json", p)
+	local function deltaBytes(change)
+		local old = ProfileSync.deepCopy(p)
+		change(p)
+		return #serde.encode("json", ProfileSync.diff(old, p))
+	end
+	local throw = deltaBytes(function(x)
+		x.inventory.mango -= 1
+		x.coins += 40
+		x.trust.dewhop += 3
+		x.fedCount.dewhop += 1
+		x.stats.totalFeeds += 1
+		x.stats.coinsEarned += 40
+	end)
+	local cook = deltaBytes(function(x)
+		x.inventory.dewberry -= 2
+		x.inventory.dewberry_jam += 3
+		x.cooked.cook_dewberry_jam = 1
+		x.stats.mealsCooked += 1
+	end)
+	local place = deltaBytes(function(x)
+		x.decorPlaced.meadow = { p1 = "daisy_lantern" }
+	end)
+	print(
+		string.format(
+			"       (late-game profile: full snapshot %d B; deltas: feed %d B, cook %d B, place decoration %d B)",
+			full,
+			throw,
+			cook,
+			place
+		)
+	)
+	truthy(throw < 600 and cook < 600 and place < 300, "deltas stay small")
+	truthy(full > 10 * throw, "a delta is far smaller than the snapshot it replaces")
 end)
 
 print("Manifest")

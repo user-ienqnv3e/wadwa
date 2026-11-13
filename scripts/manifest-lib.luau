@@ -6,10 +6,10 @@ local Manifest = {}
 -- Items exercised end to end in the offline simulator (tests/integration.luau, tests/client.luau).
 Manifest.SimulatedEndToEnd = {
 	animal = { croakle = true },
-	food = { dewberry = true, dewberry_jam = true, field_pea = true },
+	food = { dewberry = true, dewberry_jam = true, field_pea = true, mango = true },
 	recipe = { cook_dewberry_jam = true, lure_dewhop = true },
 	quest = { visit_croakle = true },
-	decoration = { daisy_lantern = true },
+	decoration = { daisy_lantern = true, clover_bench = true },
 	upgrade = { rapport_hopper = true },
 }
 

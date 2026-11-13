@@ -26,7 +26,7 @@ local DecorService = {}
 
 local deps: Deps
 local root: Folder
-local lanes: { [number]: Player } = {}
+local lanes: { [number]: Player? } = {}
 local laneOf: { [Player]: number } = {}
 -- player -> "habitat:slot" -> { id, model }
 local shown: { [Player]: { [string]: { id: string, model: Model } } } = {}
@@ -121,13 +121,14 @@ function DecorService.sync(player: Player)
 		return
 	end
 	shown[player] = current
-	local folder = folders[player]
+	local folder: Folder = folders[player]
 	if not folder then
-		folder = Instance.new("Folder")
-		folder.Name = "Garden_" .. player.UserId
-		folder:SetAttribute("Owner", player.UserId)
-		folder.Parent = root
-		folders[player] = folder
+		local created = Instance.new("Folder")
+		created.Name = "Garden_" .. player.UserId
+		created:SetAttribute("Owner", player.UserId)
+		created.Parent = root
+		folders[player] = created
+		folder = created
 	end
 	for key, entry in pairs(current) do
 		local want = wanted[key]

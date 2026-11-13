@@ -571,6 +571,135 @@ test("Kitchen, Quests and Decor tabs render, page, filter and send server-valida
 	noFailures(engine)
 end)
 
+print("Catalog search, pinned food bar, profile deltas")
+test("search filters the catalog by name/description, combines with filters and paging, shows empty results", function()
+	local engine, player, client = session()
+	richProfile(engine, player)
+	local Hud = client:controller("Hud")
+	Hud.openPanel("Pantry")
+	engine:advance(0.3)
+	local box = client:find("SearchBox")
+	truthy(box and box:IsA("TextBox") and box.Visible, "search box on catalog tabs")
+	local _, content = panelContent(client)
+	client:type(box, "jam")
+	engine:advance(0.2)
+	local text = textOf(content)
+	truthy(string.find(text, "Dewberry Jam", 1, true), "match by name")
+	truthy(not string.find(text, "Clover Bun", 1, true), "non-matches hidden")
+	truthy(client:find("SearchBox") == box, "the box is never rebuilt (typing keeps focus)")
+	-- A state push while typing never overwrites the text or rebuilds the box.
+	client:type(box, "jam j")
+	pushState(engine, player)
+	eq(box.Text, "jam j", "text kept across refresh")
+	client:type(box, "zzqx")
+	engine:advance(0.2)
+	truthy(client:find("NoResults"), "empty results message")
+	truthy(string.find(textOf(content), "No matches for", 1, true), "explains the empty result")
+	-- Description search + category filter + paging together.
+	client:type(box, "sea")
+	engine:advance(0.2)
+	local unfiltered = textOf(content)
+	client:click(client:find("Filter_Pantry")) -- core
+	client:click(client:find("Filter_Pantry")) -- harvest
+	engine:advance(0.2)
+	local filtered = textOf(content)
+	truthy(string.find(filtered, "Filter: harvest", 1, true) and string.find(filtered, "Sea Grape", 1, true), "harvest + search")
+	truthy(string.find(unfiltered, "Made by the", 1, true), "unfiltered search includes cooked dishes")
+	truthy(not string.find(filtered, "Made by the", 1, true), "cooked filtered out")
+	-- Each tab keeps its own query.
+	Hud.openPanel("Quests")
+	engine:advance(0.2)
+	eq(box.Text, "", "quests tab has its own (empty) query")
+	Hud.openPanel("Pantry")
+	engine:advance(0.2)
+	eq(box.Text, "sea", "pantry query restored")
+	-- Typing in the box never triggers hotkeys (Roblox marks those key presses as processed).
+	Hud.closePanel()
+	client:keyDown(Enum.KeyCode.P, true)
+	engine:advance(0.2)
+	truthy(not client:find("PanelHolder"):FindFirstChildOfClass("Frame").Visible, "processed keys ignored")
+	noFailures(engine)
+end)
+
+test("pins are saved by the server and drive the HUD bar; the bar pages, number keys and pads select safely", function()
+	local engine, player, client = session()
+	local profile = richProfile(engine, player)
+	for _, id in ipairs({ "mango", "dewberry_jam", "acorn", "truffle", "papaya", "lime", "coconut" }) do
+		profile.unlockedFoods[id] = true
+		profile.inventory[id] = 5
+	end
+	pushState(engine, player)
+	local Hud = client:controller("Hud")
+	Hud.openPanel("Pantry")
+	engine:advance(0.2)
+	client:type(client:find("SearchBox"), "mango")
+	engine:advance(0.2)
+	client:click(client:find("Pin_mango"))
+	client:click(client:find("Pin_mango")) -- double tap: one request
+	engine:advance(0.8)
+	eq(table.concat(serverProfile(engine, player).pinned, ","), "mango", "pinned once on the server")
+	truthy(client:find("Food_mango"), "pinned food is on the bar")
+	truthy(string.find(client:find("Food_mango").Text, "📌", 1, true), "pin marker")
+	-- With more stocked foods than slots, the bar pages.
+	truthy(client:find("FoodNext") and client:find("FoodPrev"), "page arrows")
+	local Store = client:controller("Store")
+	eq(#Store.barFoods, 5, "5 foods + arrows fit the bar width")
+	local firstPage = table.concat(Store.barFoods, ",")
+	client:click(client:find("FoodNext"))
+	engine:advance(0.2)
+	truthy(table.concat(Store.barFoods, ",") ~= firstPage, "next page shows other foods")
+	-- Number keys pick from what is on screen.
+	local onScreen = Store.barFoods[2]
+	client:keyDown(Enum.KeyCode.Two)
+	engine:advance(0.6)
+	eq(serverProfile(engine, player).selectedFood, onScreen, "key 2 selects the 2nd visible food")
+	-- Gamepad R1 cycles through every bar food.
+	local before = serverProfile(engine, player).selectedFood
+	client:gamepadDown(Enum.KeyCode.ButtonR1)
+	engine:advance(0.6)
+	truthy(serverProfile(engine, player).selectedFood ~= before, "R1 cycles")
+	truthy(table.find(Store.barFoods, serverProfile(engine, player).selectedFood), "the selection stays visible")
+	-- Touch: tapping a bar button selects it.
+	local target = Store.barFoods[1]
+	client:click(client:find("Food_" .. target))
+	engine:advance(0.6)
+	eq(serverProfile(engine, player).selectedFood, target, "tap selects")
+	-- Hostile pins are refused by the server.
+	client:send("Action", table.pack({ kind = "PinFood", id = "sunberry" }))
+	client:send("Action", table.pack({ kind = "PinFood", id = "starlight_sushi" }))
+	engine:advance(0.6)
+	eq(#serverProfile(engine, player).pinned, 1, "free / unknown-to-player foods can't be pinned")
+	noFailures(engine)
+end)
+
+test("the client mirror follows deltas exactly and resyncs after a missed message", function()
+	local engine, player, client = session()
+	local ProfileSync = engine:shared("ProfileSync")
+	local Store = client:controller("Store")
+	local profile = serverProfile(engine, player)
+	for i = 1, 6 do
+		profile.coins += 100
+		profile.inventory.clover_bun = i
+		profile.unlockedFoods.clover_bun = true
+		profile.pinned = if i % 2 == 0 then { "clover_bun" } else {}
+		pushState(engine, player)
+	end
+	truthy(ProfileSync.deepEqual(Store.profile, engine.remoteCopy(profile)), "mirror equals server")
+	-- Simulate a lost message: deliver a delta that skips ahead. It's ignored and a snapshot asked for.
+	local sent = #client:sentOf("Action")
+	client:deliver("State", { { seq = 999, full = false, delta = { set = { coins = 1 } }, persistence = "DataStore" } })
+	engine:advance(0.6)
+	truthy(Store.profile.coins ~= 1, "out-of-order delta not applied")
+	truthy(#client:sentOf("Action") > sent, "resync requested")
+	engine:advance(0.6)
+	truthy(ProfileSync.deepEqual(Store.profile, engine.remoteCopy(profile)), "mirror equals server after resync")
+	-- Malformed State payloads never crash the client.
+	client:deliver("State", { "junk" })
+	client:deliver("State", { { seq = "x" } })
+	engine:advance(0.3)
+	noFailures(engine)
+end)
+
 print(string.format("\n%d passed, %d failed", passed, failed))
 if failed > 0 then
 	process.exit(1)

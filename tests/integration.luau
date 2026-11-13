@@ -1298,6 +1298,179 @@ test("visitor slots rotate over time without ever exceeding the animal cap", fun
 	noFailures(engine)
 end)
 
+--------------------------------------------------------------------------------
+print("Profile sync: one snapshot, then sequenced deltas")
+test("joins get one full snapshot; later changes arrive as small ordered deltas that rebuild the profile", function()
+	local engine = boot()
+	local serde = require("@lune/serde")
+	local ProfileSync = engine:shared("ProfileSync")
+	local a = join(engine, 951)
+	local b = join(engine, 952)
+	local profileA = profileOf(engine, a)
+	profileA.coins = 3000
+	local fullBytes, deltaBytes, deltas = 0, 0, 0
+	for i = 1, 12 do
+		engine:fireServer(a, "Action", { kind = "BuyUpgrade", id = "strong_arm", expect = profileA.upgrades.strong_arm or 0 })
+		profileA.inventory.dewberry = i -- a server-side change (as a landing projectile would make)
+		profileA.decorOwned.daisy_lantern = 1
+		profileA.decorPlaced.meadow = if i % 2 == 0 then { p1 = "daisy_lantern" } else nil
+		engine:service("StateService").markDirty(a)
+		engine:advance(0.4)
+	end
+	profileA.decorPlaced.meadow = nil -- nested deletion of a whole section entry
+	profileA.inventory.dewberry = nil -- and of a single key
+	engine:service("StateService").markDirty(a)
+	engine:advance(0.4)
+	local seqs = {}
+	for _, m in ipairs(engine:messages(a, "State")) do
+		table.insert(seqs, m.seq)
+		local bytes = #serde.encode("json", m)
+		if m.full then
+			fullBytes = math.max(fullBytes, bytes)
+			truthy(m.profile ~= nil and m.delta == nil, "full carries the profile")
+		else
+			deltas += 1
+			deltaBytes = math.max(deltaBytes, bytes)
+			truthy(m.profile == nil, "a delta never carries the whole profile")
+		end
+	end
+	for i = 2, #seqs do
+		eq(seqs[i], seqs[i - 1] + 1, "sequence is contiguous")
+	end
+	truthy(deltas >= 10, "deltas sent: " .. deltas)
+	local merged = engine:lastState(a)
+	eq(merged.gaps, 0, "no gaps")
+	truthy(ProfileSync.deepEqual(merged.profile, engine.remoteCopy(profileA)), "client mirror equals the server profile")
+	eq(merged.profile.decorPlaced.meadow, nil, "nested deletion arrived")
+	eq(merged.profile.inventory.dewberry, nil, "key deletion arrived")
+	print(string.format("       (sim: full snapshot %d B, largest delta %d B over %d deltas)", fullBytes, deltaBytes, deltas))
+	-- Privacy: B never receives anything about A's profile.
+	for _, m in ipairs(engine:messages(b, "State")) do
+		local profile = if m.full then m.profile else nil
+		truthy(not profile or profile.coins ~= 3000, "no cross-player state")
+		truthy(m.full or not (m.delta.set and m.delta.set.coins == 3000), "no cross-player delta")
+	end
+	noFailures(engine)
+end)
+
+test("unchanged pushes are skipped; RequestState forces a fresh snapshot; leaving frees the copy", function()
+	local engine = boot()
+	local player = join(engine, 953)
+	local StateService = engine:service("StateService")
+	engine:advance(3) -- let the spawn-side sighting of the tutorial Puffhop (a real change) settle
+	local before = #engine:messages(player, "State")
+	for _ = 1, 5 do
+		StateService.markDirty(player)
+		engine:advance(0.3)
+	end
+	eq(#engine:messages(player, "State"), before, "nothing changed -> nothing sent")
+	engine:fireServer(player, "Action", { kind = "RequestState" })
+	engine:advance(0.4)
+	local list = engine:messages(player, "State")
+	eq(list[#list].full, true, "resync is a full snapshot")
+	eq(StateService.trackedCount(), 1, "one tracked copy")
+	engine:removePlayer(player)
+	engine:advance(1)
+	eq(StateService.trackedCount(), 0, "copy released on leave")
+	noFailures(engine)
+end)
+
+--------------------------------------------------------------------------------
+print("Decorations in the shared world")
+local function gardenModels(engine, player)
+	local folder = engine.workspace.WildFeastDecor:FindFirstChild("Garden_" .. player.UserId)
+	return if folder then folder:GetChildren() else {}
+end
+
+test("placed decorations appear for everyone at the owner's plot, swap, move out and clean up", function()
+	local engine = boot()
+	local Config = engine.config
+	local player = join(engine, 961)
+	local other = join(engine, 962)
+	local profile = profileOf(engine, player)
+	profile.coins = 9000
+	for _, id in ipairs({ "daisy_lantern", "clover_bench" }) do
+		engine:fireServer(player, "Action", { kind = "BuyDecor", id = id, expect = 0 })
+		engine:advance(0.3)
+	end
+	engine:fireServer(player, "Action", { kind = "PlaceDecor", id = "daisy_lantern", habitat = "meadow", slot = 3 })
+	engine:advance(0.3)
+	local models = gardenModels(engine, player)
+	eq(#models, 1, "one model in the shared Workspace folder (replicated to every client)")
+	local model = models[1]
+	eq(model:GetAttribute("DecorId"), "daisy_lantern")
+	eq(model:GetAttribute("Owner"), player.UserId)
+	local lane = engine:service("DecorService").laneOf(player)
+	local expected = engine:service("DecorService").plotFrame("meadow", lane, 3)
+	local base = model.PrimaryPart
+	truthy((base.CFrame.Position - expected.Position).Magnitude < 6, "model stands on its plot")
+	truthy(math.abs(expected.Position.Y - Config.Habitats.meadow.GroundY) < 1e-6, "plot on the grass")
+	local c = Config.Habitats.meadow.Center
+	local r = (Vector3.new(expected.Position.X, 0, expected.Position.Z) - Vector3.new(c[1], 0, c[2])).Magnitude
+	truthy(r < Config.Habitats.meadow.Radius * 0.9, "plot is on the island")
+	for _, part in ipairs(model:GetDescendants()) do
+		if part:IsA("BasePart") then
+			truthy(part.Anchored and not part.CanCollide and not part.CanQuery and not part.CanTouch, "inert parts")
+		end
+	end
+	truthy(#model:GetChildren() <= Config.Decor.MaxPartsPerModel, "bounded parts")
+	-- Swap the plot to another piece: the old model goes, the new one appears.
+	engine:fireServer(player, "Action", { kind = "PlaceDecor", id = "clover_bench", habitat = "meadow", slot = 3 })
+	engine:advance(0.3)
+	models = gardenModels(engine, player)
+	eq(#models, 1, "still one model")
+	eq(models[1]:GetAttribute("DecorId"), "clover_bench", "swapped")
+	truthy(model.Parent == nil, "old model destroyed")
+	-- A hostile placement changes nothing in the world.
+	engine:fireServer(player, "Action", { kind = "PlaceDecor", id = "daisy_lantern", habitat = "meadow", slot = 40 })
+	engine:fireServer(other, "Action", { kind = "RemoveDecor", habitat = "meadow", slot = 3 })
+	engine:advance(0.3)
+	eq(#gardenModels(engine, player), 1, "other players can't remove it")
+	engine:fireServer(player, "Action", { kind = "RemoveDecor", habitat = "meadow", slot = 3 })
+	engine:advance(0.3)
+	eq(#gardenModels(engine, player), 0, "removed")
+	engine:fireServer(player, "Action", { kind = "PlaceDecor", id = "daisy_lantern", habitat = "meadow", slot = 1 })
+	engine:advance(0.3)
+	eq(engine:service("DecorService").modelCount(), 1)
+	engine:removePlayer(player)
+	engine:advance(1)
+	eq(engine:service("DecorService").modelCount(), 0, "models destroyed on leave")
+	eq(engine.workspace.WildFeastDecor:FindFirstChild("Garden_961"), nil, "folder destroyed")
+	noFailures(engine)
+end)
+
+test("a rejoining player's saved garden is rebuilt; lanes are bounded and freed", function()
+	local engine = boot()
+	local Config = engine.config
+	local players = {}
+	for i = 1, Config.Decor.Lanes + 1 do
+		local p = join(engine, 970 + i)
+		local profile = profileOf(engine, p)
+		profile.decorOwned.daisy_lantern = 1
+		profile.decorPlaced.meadow = { p1 = "daisy_lantern" }
+		engine:service("DecorService").sync(p)
+		players[i] = p
+	end
+	eq(engine:service("DecorService").modelCount(), Config.Decor.Lanes, "only one lane per drawn garden")
+	eq(engine:service("DecorService").laneOf(players[#players]), nil, "extra player not drawn")
+	truthy(string.find(notifications(engine, players[#players]), "aren't shown", 1, true), "extra player told")
+	-- Distinct lanes never share a position.
+	local seen = {}
+	for i = 1, Config.Decor.Lanes do
+		local lane = engine:service("DecorService").laneOf(players[i])
+		truthy(not seen[lane], "unique lane")
+		seen[lane] = true
+	end
+	-- The first player leaves (save) and rejoins: the garden comes back from the saved profile.
+	engine:removePlayer(players[1])
+	engine:advance(2)
+	local back = join(engine, 971)
+	engine:advance(1)
+	eq(#gardenModels(engine, back), 1, "saved garden rebuilt on rejoin")
+	truthy(engine:service("DecorService").modelCount() <= Config.Decor.Lanes, "bounded")
+	noFailures(engine)
+end)
+
 print(string.format("\n%d passed, %d failed", passed, failed))
 if failed > 0 then
 	process.exit(1)

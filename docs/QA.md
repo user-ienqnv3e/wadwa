@@ -110,3 +110,27 @@ Result: ✅ pass · ⚠ gap (not verifiable here). Method: S = Sim, U = Unit, St
 - The per-key write throttle model errors instead of queueing, which is stricter than Roblox.
 - Animals move through decorative props (anchored CFrame movement, no pathfinding). Stuck recovery only covers lack of progress.
 - The local gate-open state is client-side by design. The server enforces access by bouncing players out of locked islands.
+
+## Expansion pass (PR #4): 1,000 content additions, then the four follow-up gaps
+
+All checks below are **offline**: unit/content rules in Lune, plus the engine simulator running the
+real scripts from the built place. Roblox Studio is not available on this Linux host, so nothing here
+was rendered, physically simulated, networked for real, or played on a device.
+
+| Gap | Implementation | Regressions |
+|---|---|---|
+| Decoration rendering | `DecorService` (server) builds placed pieces with `DecorFactory` into `Workspace.WildFeastDecor/Garden_<UserId>`, so all players see them (replicated like any Workspace part). Each player in the server gets one of `Config.Decor.Lanes` (6) interleaved plot rings per island. Models are diffed against the owner's saved `decorPlaced` (only changed plots are rebuilt) and destroyed when the owner leaves. Parts are anchored and have CanCollide, CanQuery and CanTouch off; ≤ 6 parts per model, ≤ 6 × 3 × 12 models in total. A player beyond the lane limit keeps the effects and is told their pieces aren't drawn. | integration: plot transform on its island, swap, hostile placement, another player can't remove it, cleanup on leave, rejoin rebuilds the saved garden, lane bound + notice; fuzz: model and folder bounds, ownership invariants |
+| Food bar pinning | The HUD bar comes from `Economy.barFoods`: free food, selection, the **server-saved** `pinned` list, core foods, then every other stocked food, in pages. With more than 6 foods it shows 5 foods + ◀ ▶ (fits the original 780-px bar). Keys 1–6 pick visible slots; Q/L1/R1 cycle all bar foods and the page follows the selection; touch taps select. The Pantry has Pin/Unpin and Select. | client: pin via the Pantry (double tap sends once), 📌 marker, paging, key 2 = 2nd visible, R1 cycles and stays visible, tap selects, hostile pins refused; unit: bar bounds, pin cap |
+| Menu search | One persistent `SearchBox` above the panel content (never rebuilt, so typing keeps focus; refreshes never overwrite its text). There is one query per tab, combined with that tab's category filter and paging, with an explicit empty-results row. It covers Pantry (156 foods), Kitchen (200), Quests (300), Decor (150), Upgrades (105) and Journal (106 species, with visitor lure buttons). Hotkeys ignore keys Roblox marks as processed (typing). | client: name/description matches, filter + search + paging, empty results, refresh during typing, per-tab queries, processed keys ignored |
+| Efficient profile updates | `ProfileSync` (shared, pure). The server sends one full snapshot on join and on `RequestState`, then sequenced deltas per top-level section: whole replacement for scalars/arrays, a second-level `set` + `del` patch for maps (deletions travel as key lists because nil can't cross a remote). Unchanged pushes are skipped. A client that sees a gap ignores the delta and requests a snapshot. Each player has a private server-side copy, released on leave. | unit: 3,000-step seeded diff/apply fuzz through JSON (nested deletions, arrays), malformed deltas; integration: contiguous seqs, mirror == server, deletions, no cross-player state, skip/resync/cleanup; client: mirror == server, gap → resync, junk payloads; fuzz: no gaps, final mirror == server for every player |
+
+**Payload measurements (JSON-encoded bytes in tests; not live network numbers):**
+- Late-game profile (156 foods, 106 species, 300 quests claimed): full snapshot **18,635 B**. Typical deltas: one feed **180 B**, one cook **141 B**, placing a decoration **67 B**.
+- Simulator (fresh profile, 14 mixed changes): full snapshot 634 B, largest delta 201 B.
+- Worst-case maxed save: 38,166 B of JSON.
+
+**Tooling this pass.**
+- selene had no execute bit in the local mise install (`chmod +x`, not a repo change). It now runs: 0 errors, plus 6 style warnings, all in lines that predate the expansion.
+- luau-lsp was run against the downloaded Roblox `globalTypes.d.luau`. It found ~190 strict-mode type errors in the expansion data and Config loader (mixed-type rows, the Lune-only string require). These are fixed and the result is now **0 errors**.
+
+**Still not verified:** visual appearance and placement of decorations in a real renderer, actual replication timing, touch/gamepad feel of the paged bar, TextBox focus behaviour on real devices, real network byte counts.

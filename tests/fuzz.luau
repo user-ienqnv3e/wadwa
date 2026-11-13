@@ -124,6 +124,31 @@ local function check(engine, label, players)
 		assert(d <= a.habitat.Radius, label .. ": animal " .. a.id .. " left its island")
 	end
 	assert(engine:service("StateService").pendingCount() <= #engine.players.list, label .. ": dirty map holds departed players")
+	assert(engine:service("StateService").trackedCount() <= #engine.players.list, label .. ": sync copies leaked")
+	local decor = engine:service("DecorService")
+	assert(decor.modelCount() <= Config.Decor.Lanes * #Config.HabitatOrder * 12, label .. ": decoration models unbounded")
+	assert(#engine.workspace.WildFeastDecor:GetChildren() <= Config.Decor.Lanes, label .. ": garden folders leaked")
+	for _, player in ipairs(players) do
+		local profile = DataService.getProfile(player)
+		if profile then
+			-- Decoration ownership: never more placed than owned, own island only, inside the plots.
+			for habitatId, slots in pairs(profile.decorPlaced) do
+				for key, id in pairs(slots) do
+					local d = Config.Decorations[id]
+					assert(d and d.Habitat == habitatId, label .. ": decoration on the wrong island")
+					local slot = tonumber(string.sub(key, 2))
+					assert(slot and slot >= 1 and slot <= engine:shared("Economy").plots(Config, profile), label .. ": plot out of range")
+				end
+			end
+			for id, n in pairs(profile.decorOwned) do
+				assert(engine:shared("Economy").placedCount(profile, id) <= n, label .. ": placed more than owned")
+			end
+			assert(#profile.pinned <= Config.FoodBar.MaxPinned, label .. ": too many pins")
+			-- The client mirror rebuilt from every State message matches the server (once flushed).
+			local state = engine:lastState(player)
+			assert(state == nil or state.gaps == 0, label .. ": State sequence gap")
+		end
+	end
 	-- Server-side workspace growth must stay bounded (no leaked parts/folders per throw or event).
 	assert(#engine.workspace:GetChildren() < 40, label .. ": workspace children grew to " .. #engine.workspace:GetChildren())
 end
@@ -245,8 +270,47 @@ local function runSeed(seed)
 					profile.coins = math.min(profile.coins + rng.int(0, 400), Config.Caps.Coins)
 					profile.research = math.min(profile.research + rng.int(0, 6), Config.Caps.Research)
 				end
-				local kinds = { "BuyUpgrade", "Restore", "BuyFood", "UnlockFood", "UnlockHabitat", "SelectFood" }
+				local kinds = { "BuyUpgrade", "Restore", "BuyFood", "UnlockFood", "UnlockHabitat", "SelectFood", "Expansion" }
 				local kind = rng.pick(kinds)
+				if kind == "Expansion" then
+					-- Expansion actions with real ids, sometimes repeated; the rules decide what succeeds.
+					profile.research = math.min(profile.research + 4, Config.Caps.Research)
+					local pick = rng.int(1, 7)
+					local payload
+					if pick == 1 then
+						payload = { kind = "Cook", id = rng.pick(Config.RecipeOrder), expect = 0 }
+						local recipe = Config.Recipes[payload.id]
+						payload.expect = profile.cooked[payload.id] or 0
+						for input, count in pairs(recipe.Inputs) do
+							if not Config.Foods[input].Free then
+								profile.unlockedFoods[input] = true
+								profile.inventory[input] = math.min((profile.inventory[input] or 0) + count, Config.Caps.FoodStack)
+							end
+						end
+					elseif pick == 2 then
+						payload = { kind = "ClaimQuest", id = rng.pick(Config.QuestOrder) }
+					elseif pick == 3 then
+						local id = rng.pick(Config.DecorationOrder)
+						payload = { kind = "BuyDecor", id = id, expect = profile.decorOwned[id] or 0 }
+					elseif pick == 4 then
+						local id = rng.pick(Config.DecorationOrder)
+						profile.decorOwned[id] = profile.decorOwned[id] or 1
+						payload = { kind = "PlaceDecor", id = id, habitat = Config.Decorations[id].Habitat, slot = rng.int(0, 14) }
+					elseif pick == 5 then
+						payload = { kind = "RemoveDecor", habitat = rng.pick(Config.HabitatOrder), slot = rng.int(1, 12) }
+					elseif pick == 6 then
+						local id = rng.pick(Config.VisitorOrder)
+						profile.lures[id] = 1
+						payload = { kind = "UseLure", id = id }
+					else
+						payload = { kind = "PinFood", id = rng.pick(Config.AllFoodOrder) }
+					end
+					for _ = 1, if rng.chance(0.3) then 2 else 1 do
+						engine:fireServer(p, "Action", payload)
+					end
+					engine:service("StateService").markDirty(p)
+					kind = "SelectFood"
+				end
 				local id, expect
 				if kind == "BuyUpgrade" then
 					id = rng.pick(Config.UpgradeOrder)
@@ -318,6 +382,24 @@ local function runSeed(seed)
 
 	-- Persistence at the end: everything that was saving is saved and every lock released.
 	backend.failNext = 0
+	-- After the last push, every client's delta-rebuilt mirror equals its server profile.
+	local ProfileSync = engine:shared("ProfileSync")
+	for _, p in ipairs(players) do
+		if DataService.getProfile(p) then
+			engine:service("StateService").markDirty(p)
+		end
+	end
+	engine:advance(0.6)
+	for _, p in ipairs(players) do
+		local profile = DataService.getProfile(p)
+		local state = engine:lastState(p)
+		if profile and state then
+			assert(
+				ProfileSync.deepEqual(state.profile, Engine.remoteCopy(profile)),
+				string.format("seed %d: client mirror diverged for %d", seed, p.UserId)
+			)
+		end
+	end
 	local expected = {}
 	for _, p in ipairs(players) do
 		local session = DataService.getSession(p)

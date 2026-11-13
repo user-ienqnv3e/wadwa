@@ -153,7 +153,7 @@ None of these items has been played in Roblox Studio or on a device.
 | 140 | food | `blackberry` | `src/shared/Content/Foods.luau` | Mistfern Grove harvest, fruity; Pantry: learn 288 coins + 10 research, batch 17 coins; throw/feast/ingredient | D, R |
 | 141 | food | `sea_grape` | `src/shared/Content/Foods.luau` | Coralglass Lagoon harvest, salty; Pantry: learn 120 coins + 8 research, batch 11 coins; throw/feast/ingredient | D, R |
 | 142 | food | `coconut` | `src/shared/Content/Foods.luau` | Coralglass Lagoon harvest, nutty; Pantry: learn 135 coins + 8 research, batch 11 coins; throw/feast/ingredient | D, R |
-| 143 | food | `mango` | `src/shared/Content/Foods.luau` | Coralglass Lagoon harvest, fruity; Pantry: learn 150 coins + 8 research, batch 12 coins; throw/feast/ingredient | D, R |
+| 143 | food | `mango` | `src/shared/Content/Foods.luau` | Coralglass Lagoon harvest, fruity; Pantry: learn 150 coins + 8 research, batch 12 coins; throw/feast/ingredient | D, R, S |
 | 144 | food | `sea_lettuce` | `src/shared/Content/Foods.luau` | Coralglass Lagoon harvest, leafy; Pantry: learn 165 coins + 9 research, batch 12 coins; throw/feast/ingredient | D, R |
 | 145 | food | `tide_clam` | `src/shared/Content/Foods.luau` | Coralglass Lagoon harvest, savory; Pantry: learn 180 coins + 9 research, batch 13 coins; throw/feast/ingredient | D, R |
 | 146 | food | `beach_plum` | `src/shared/Content/Foods.luau` | Coralglass Lagoon harvest, sour; Pantry: learn 195 coins + 9 research, batch 13 coins; throw/feast/ingredient | D, R |
@@ -762,7 +762,7 @@ None of these items has been played in Roblox Studio or on a device.
 | 749 | quest | `species_fed_3` | `src/shared/Content/Quests.luau` | Friends: speciesFed  x60 after `species_fed_2`; reward 200 coins | D, R |
 | 750 | quest | `species_fed_4` | `src/shared/Content/Quests.luau` | Friends: speciesFed  x106 after `species_fed_3`; reward 260 coins | D, R |
 | 751 | decoration | `daisy_lantern` | `src/shared/Content/Decorations.luau` | Sunpetal Meadow lantern; Decor shop 25 coins + 0 research; place on a plot: comfort 2, favours puffhop | D, R, S |
-| 752 | decoration | `clover_bench` | `src/shared/Content/Decorations.luau` | Sunpetal Meadow bench; Decor shop 31 coins + 0 research; place on a plot: comfort 3, favours clovernib | D, R |
+| 752 | decoration | `clover_bench` | `src/shared/Content/Decorations.luau` | Sunpetal Meadow bench; Decor shop 31 coins + 0 research; place on a plot: comfort 3, favours clovernib | D, R, S |
 | 753 | decoration | `sunflower_planter` | `src/shared/Content/Decorations.luau` | Sunpetal Meadow planter; Decor shop 37 coins + 0 research; place on a plot: comfort 2, favours fuzzlefinch | D, R |
 | 754 | decoration | `picket_fence` | `src/shared/Content/Decorations.luau` | Sunpetal Meadow fence; Decor shop 43 coins + 0 research; place on a plot: comfort 1, favours buttonbun | D, R |
 | 755 | decoration | `hay_bale_stack` | `src/shared/Content/Decorations.luau` | Sunpetal Meadow totem; Decor shop 49 coins + 0 research; place on a plot: comfort 3, favours haywhisk | D, R |
