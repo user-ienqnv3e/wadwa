@@ -126,6 +126,16 @@ function Economy.foodCount(config: any, profile: any, foodId: string): number
 	return profile.inventory[foodId] or 0
 end
 
+-- The first always-free food in display order (the fallback when a stocked food runs out).
+function Economy.freeFood(config: any): string
+	for _, id in ipairs(config.FoodOrder) do
+		if config.Foods[id].Free then
+			return id
+		end
+	end
+	return config.FoodOrder[1]
+end
+
 function Economy.hasFood(config: any, profile: any, foodId: string): boolean
 	return Economy.foodCount(config, profile, foodId) > 0
 end
@@ -372,7 +382,12 @@ function Economy.nextGoal(config: any, profile: any): Goal
 	end
 	if not profile.unlockedFoods.clover_bun then
 		local cost = config.Foods.clover_bun.UnlockCost
-		return { id = "learn_clover", text = "Learn the Clover Bun recipe (" .. costText(cost) .. ")" }
+		return {
+			id = "learn_clover",
+			text = "Learn the Clover Bun recipe (" .. costText(cost) .. ")",
+			progress = math.min(profile.coins, cost.Coins),
+			target = cost.Coins,
+		}
 	end
 	if (profile.fedCount.waddlebill or 0) == 0 then
 		return { id = "feed_waddlebill", text = "Feed a Waddlebill by the meadow pond" }
@@ -392,6 +407,8 @@ function Economy.nextGoal(config: any, profile: any): Goal
 			return {
 				id = "restore_" .. habitatId,
 				text = habitat.Restoration[1].Name .. " in " .. habitat.Name .. " (" .. costText(cost) .. ")",
+				progress = math.min(profile.coins, cost.Coins),
+				target = cost.Coins,
 			}
 		end
 	end
@@ -405,7 +422,14 @@ function Economy.nextGoal(config: any, profile: any): Goal
 	for _, habitatId in ipairs(config.HabitatOrder) do
 		local cost = Economy.nextRestorationCost(config, profile, habitatId)
 		if cost then
-			return { id = "restore_more_" .. habitatId, text = "Keep restoring " .. config.Habitats[habitatId].Name }
+			local habitat = config.Habitats[habitatId]
+			local step = habitat.Restoration[Economy.restorationLevel(profile, habitatId) + 1]
+			return {
+				id = "restore_more_" .. habitatId,
+				text = step.Name .. " in " .. habitat.Name .. " (" .. costText(cost) .. ")",
+				progress = math.min(profile.coins, cost.Coins),
+				target = cost.Coins,
+			}
 		end
 	end
 	return { id = "befriend", text = "Raise every animal to max trust" }

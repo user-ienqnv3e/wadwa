@@ -334,6 +334,139 @@ test("session lock evaluation", function()
 	eq(SaveSchema.evaluateLock({ lock = { jobId = "B", time = NaN } }, "A", 1000, 300), "stale")
 end)
 
+test("v1 migration keeps discoveries already in the v2 shape and survives bad fields", function()
+	local migrated = SaveSchema.migrate(Config, {
+		-- A v2-shaped save that lost its schemaVersion is treated as v1; its discoveries must survive.
+		discoveries = { puffhop = { sunberry = true, nope = "yes" }, [1] = "waddlebill:clover_bun" },
+		restoration = "broken",
+	})
+	eq(migrated.discoveries.puffhop.sunberry, true, "dict entry kept")
+	eq(migrated.discoveries.puffhop.nope, nil, "non-true values dropped")
+	eq(migrated.discoveries.waddlebill.clover_bun, true, "list entry migrated")
+	eq(type(migrated.restoration), "table", "bad restoration replaced")
+	local clean = SaveSchema.sanitize(Config, migrated)
+	eq(clean.discoveries.puffhop.sunberry, true, "sanitised keeps it")
+end)
+
+test("every reachable lock state is evaluated safely", function()
+	eq(SaveSchema.evaluateLock(nil, "a", 100, 300), "free")
+	eq(SaveSchema.evaluateLock("garbage", "a", 100, 300), "free")
+	eq(SaveSchema.evaluateLock({ lock = "x" }, "a", 100, 300), "free")
+	eq(SaveSchema.evaluateLock({ lock = { jobId = "a", time = 1 } }, "a", 100, 300), "ours")
+	eq(SaveSchema.evaluateLock({ lock = { jobId = "b", time = 50 } }, "a", 100, 300), "held")
+	eq(SaveSchema.evaluateLock({ lock = { jobId = "b", time = 50 } }, "a", 400, 300), "stale")
+	eq(SaveSchema.evaluateLock({ lock = { jobId = "b", time = "soon" } }, "a", 100, 300), "stale")
+end)
+
+print("Progression (pure-rule simulation: no softlocks, every goal reachable)")
+test("a player using only free food and sensible choices reaches every goal", function()
+	local profile = newProfile()
+	local qualities = { "Ground", "Good", "Perfect" }
+	local seen = {}
+	local steps = 0
+	local function tryBuyAll()
+		local bought = false
+		for _, id in ipairs(Config.HabitatOrder) do
+			bought = Economy.tryUnlockHabitat(Config, profile, id) or bought
+			bought = Economy.tryRestore(Config, profile, id) or bought
+		end
+		for _, id in ipairs(Config.FoodOrder) do
+			bought = Economy.tryUnlockFood(Config, profile, id) or bought
+		end
+		for _, id in ipairs(Config.UpgradeOrder) do
+			bought = Economy.tryBuyUpgrade(Config, profile, id) or bought
+		end
+		return bought
+	end
+	while steps < 50000 do
+		steps += 1
+		local goal = Economy.nextGoal(Config, profile)
+		seen[goal.id] = true
+		if goal.id == "befriend" then
+			break
+		end
+		if goal.id == "feast" then
+			local rewards = FeastRules.computeRewards(Config.Feast, { [1] = Config.Feast.BaseGoal }, true)
+			Economy.addCoins(Config, profile, rewards[1].coins)
+			Economy.addResearch(Config, profile, rewards[1].research)
+			profile.stats.feastsCompleted += 1
+			profile.stats.feastsJoined += 1
+		elseif not tryBuyAll() then
+			-- Feed: rotate species and foods (only free + stocked foods, restock when affordable).
+			for _, speciesId in ipairs(Config.SpeciesOrder) do
+				local species = Config.Species[speciesId]
+				if profile.unlockedHabitats[species.Habitat] then
+					for _, foodId in ipairs(Config.FoodOrder) do
+						if profile.unlockedFoods[foodId] and not Economy.hasFood(Config, profile, foodId) then
+							Economy.tryBuyFoodBatch(Config, profile, foodId)
+						end
+						local known = profile.discoveries[speciesId] and profile.discoveries[speciesId][foodId]
+						if Economy.consumeFood(Config, profile, if known then "sunberry" else foodId) then
+							Economy.applyFeed(Config, profile, speciesId, if known then "sunberry" else foodId, qualities[steps % 3 + 1])
+						end
+					end
+				end
+			end
+		end
+		truthy(profile.coins >= 0 and profile.coins <= Config.Caps.Coins, "coins in range")
+	end
+	eq(Economy.nextGoal(Config, profile).id, "befriend", "reached the final goal in " .. steps .. " steps")
+	-- Everything else stays reachable afterwards by simply feeding.
+	for _ = 1, 20000 do
+		if not tryBuyAll() then
+			for _, speciesId in ipairs(Config.SpeciesOrder) do
+				Economy.applyFeed(Config, profile, speciesId, "sunberry", "Good")
+			end
+		end
+	end
+	for _, id in ipairs(Config.HabitatOrder) do
+		truthy(profile.unlockedHabitats[id], id .. " opened")
+		eq(Economy.restorationLevel(profile, id), #Config.Habitats[id].Restoration, id .. " restored")
+	end
+	for _, id in ipairs(Config.FoodOrder) do
+		truthy(profile.unlockedFoods[id], id .. " learned")
+	end
+	for _, id in ipairs(Config.UpgradeOrder) do
+		eq(Economy.upgradeLevel(profile, id), #Config.Upgrades[id].Levels, id .. " maxed")
+	end
+	for _, id in ipairs({ "first_feed", "first_upgrade", "unlock_grove", "unlock_lagoon", "feast", "discover" }) do
+		truthy(seen[id], "goal " .. id .. " was shown on the way")
+	end
+end)
+
+test("goals recover when steps are done out of order (never point at something already done)", function()
+	local profile = newProfile()
+	profile.stats.totalFeeds = 3
+	profile.unlockedHabitats.grove = true -- opened before Strong Arm / Clover Bun
+	profile.unlockedFoods.clover_bun = true
+	profile.fedCount.waddlebill = 1
+	profile.upgrades.strong_arm = 1
+	local goal = Economy.nextGoal(Config, profile)
+	truthy(goal.id ~= "unlock_grove" and goal.id ~= "learn_clover" and goal.id ~= "first_upgrade", "skips done steps: " .. goal.id)
+	eq(goal.id, "restore_meadow", "next real step")
+	-- Every goal that names a cost exposes progress so the HUD bar can show it.
+	profile.coins = 7
+	local again = Economy.nextGoal(Config, profile)
+	eq(again.target ~= nil, true, "cost goals expose a target")
+end)
+
+test("the free food always works: switching back after the last stocked item", function()
+	eq(Economy.freeFood(Config), "sunberry")
+	local profile = newProfile()
+	truthy(Economy.hasFood(Config, profile, Economy.freeFood(Config)), "free food always available")
+end)
+
+print("Trajectory segment queries")
+test("closestOnSegment returns the distance and where along the segment it is", function()
+	local d, t = Trajectory.closestOnSegment(Vector3.new(0, 0, 0), Vector3.new(10, 0, 0), Vector3.new(3, 4, 0))
+	truthy(math.abs(d - 4) < 1e-9 and math.abs(t - 0.3) < 1e-9, "mid")
+	d, t = Trajectory.closestOnSegment(Vector3.new(0, 0, 0), Vector3.new(10, 0, 0), Vector3.new(-5, 0, 0))
+	truthy(math.abs(d - 5) < 1e-9 and t == 0, "before start")
+	d, t = Trajectory.closestOnSegment(Vector3.new(1, 1, 1), Vector3.new(1, 1, 1), Vector3.new(1, 1, 2))
+	truthy(math.abs(d - 1) < 1e-9 and t == 0, "degenerate")
+	eq(Trajectory.distanceToSegment(Vector3.new(0, 0, 0), Vector3.new(10, 0, 0), Vector3.new(3, 4, 0)), 4)
+end)
+
 print("Grand Feast")
 test("solo appetite is finishable with free food in time", function()
 	local goal = FeastRules.goalFor(Config.Feast, 1)

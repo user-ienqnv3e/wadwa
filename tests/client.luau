@@ -212,6 +212,14 @@ test("touch: a cancelled touch (state Cancel) never leaves the throw charging", 
 	touch.UserInputState = Enum.UserInputState.Cancel
 	engine:advance(0.1)
 	eq(ThrowController.charging, false, "not stuck")
+	eq(#client:sentOf("Throw"), 0, "a cancelled touch must not throw")
+	-- The button still works afterwards.
+	engine:advance(1)
+	touch = client:touchBegin(button)
+	engine:advance(0.3)
+	client:touchEnd(touch, button)
+	engine:advance(0.2)
+	eq(#client:sentOf("Throw"), 1, "next touch throws")
 	noFailures(engine)
 end)
 
@@ -301,6 +309,160 @@ test("the Map tab offers the bell once the feast becomes ready while it is open"
 	eq(client:find("RingBell"), nil, "no bell before ready")
 	engine:advance(engine.config.Feast.FirstDelay + 2, 0.1)
 	truthy(client:find("RingBell"), "bell button appears")
+	noFailures(engine)
+end)
+
+--------------------------------------------------------------------------------
+print("Regressions: input recovery, purchases & HUD stability")
+test("losing window focus or opening the Roblox menu while holding drops the throw", function()
+	local engine, _, client = session()
+	local ThrowController = client:controller("ThrowController")
+	client:keyDown(Enum.KeyCode.F)
+	engine:advance(0.3)
+	truthy(ThrowController.charging, "charging")
+	client.uis.WindowFocusReleased:Fire()
+	engine:advance(0.1)
+	eq(ThrowController.charging, false, "focus loss cancels")
+	client:keyUp(Enum.KeyCode.F) -- may arrive late (or never)
+	engine:advance(0.2)
+	eq(#client:sentOf("Throw"), 0, "no throw from the stale hold")
+	client:keyDown(Enum.KeyCode.F)
+	engine:advance(0.3)
+	client.guiService.MenuOpened:Fire()
+	engine:advance(0.1)
+	eq(ThrowController.charging, false, "menu cancels")
+	client:keyUp(Enum.KeyCode.F)
+	engine:advance(0.2)
+	eq(#client:sentOf("Throw"), 0, "still no throw")
+	client:keyDown(Enum.KeyCode.F)
+	engine:advance(0.3)
+	client:keyUp(Enum.KeyCode.F)
+	engine:advance(0.2)
+	eq(#client:sentOf("Throw"), 1, "a fresh hold works")
+	noFailures(engine)
+end)
+
+test("multitouch: a second finger (camera) neither restarts nor releases the THROW hold", function()
+	local engine, _, client = session({ mode = "touch" })
+	local button = client:find("ThrowButton")
+	local ThrowController = client:controller("ThrowController")
+	local hold = client:touchBegin(button)
+	engine:advance(0.2)
+	local camera = { UserInputType = Enum.UserInputType.Touch, UserInputState = Enum.UserInputState.Begin }
+	client.uis.InputBegan:Fire(camera, false)
+	-- A second finger landing on the button too must not start another hold.
+	local extra = client:touchBegin(button)
+	engine:advance(0.2)
+	client:touchEnd(camera, nil)
+	client:touchEnd(extra, button)
+	engine:advance(0.2)
+	truthy(ThrowController.charging, "still charging from the first finger")
+	eq(#client:sentOf("Throw"), 0, "nothing thrown yet")
+	client:touchEnd(hold, button)
+	engine:advance(0.2)
+	eq(#client:sentOf("Throw"), 1, "one throw when the holding finger lifts")
+	noFailures(engine)
+end)
+
+test("double-tapping a purchase button sends one request and buys one level", function()
+	local engine, player, client = session()
+	local profile = serverProfile(engine, player)
+	profile.coins = 1000
+	profile.research = 20
+	pushState(engine, player)
+	client:keyDown(Enum.KeyCode.U)
+	engine:advance(0.2)
+	local button = client:find("Upgrade_strong_arm")
+	truthy(button, "upgrade button")
+	client:click(button)
+	client:click(button)
+	client:click(button)
+	engine:advance(1)
+	local sent = 0
+	for _, args in ipairs(client:sentOf("Action")) do
+		if args[1].kind == "BuyUpgrade" then
+			sent += 1
+			eq(args[1].expect, 0, "tagged with the level the player saw")
+		end
+	end
+	eq(sent, 1, "one request")
+	eq(profile.upgrades.strong_arm, 1, "one level")
+	-- After the server's answer the (rebuilt) button buys the next level normally.
+	client:click(client:find("Upgrade_strong_arm"))
+	engine:advance(1)
+	eq(profile.upgrades.strong_arm, 2, "next level")
+	noFailures(engine)
+end)
+
+test("coin/trust changes do not rebuild the food bar (taps on it survive)", function()
+	local engine, player, client = session()
+	local before = client:find("Food_sunberry")
+	truthy(before, "food button")
+	local profile = serverProfile(engine, player)
+	profile.coins += 25
+	profile.trust.puffhop = 3
+	pushState(engine, player)
+	eq(client:find("Food_sunberry"), before, "same button instance")
+	truthy(string.find(textOf(client:hud()), "Coins  25", 1, true), "coins still updated")
+	profile.unlockedFoods.clover_bun = true
+	profile.inventory.clover_bun = 2
+	pushState(engine, player)
+	truthy(client:find("Food_clover_bun"), "food bar updates when foods change")
+	noFailures(engine)
+end)
+
+test("identical toasts merge into one with a count; the stack stays bounded", function()
+	local engine, _, client = session()
+	local Hud = client:controller("Hud")
+	for _ = 1, 6 do
+		Hud.toast("Not enough coins.", "warn")
+	end
+	for i = 1, 8 do
+		Hud.toast("Message " .. i, "info")
+	end
+	engine:advance(0.1)
+	local labels, merged = 0, nil
+	local holder
+	for _, d in ipairs(client:hud():GetDescendants()) do
+		if d:IsA("TextLabel") and string.find(d.Text, "Message 8", 1, true) then
+			holder = d.Parent
+		end
+	end
+	truthy(holder, "toast holder")
+	for _, d in ipairs(holder:GetChildren()) do
+		if d:IsA("TextLabel") then
+			labels += 1
+		end
+	end
+	truthy(labels <= 4, "bounded: " .. labels)
+	Hud.toast("Same again", "info")
+	Hud.toast("Same again", "info")
+	for _, d in ipairs(holder:GetChildren()) do
+		if d:IsA("TextLabel") and string.find(d.Text, "Same again", 1, true) then
+			merged = d.Text
+		end
+	end
+	truthy(merged and string.find(merged, "×2", 1, true), "merged with a count: " .. tostring(merged))
+	engine:advance(5)
+	local left = 0
+	for _, d in ipairs(holder:GetChildren()) do
+		if d:IsA("TextLabel") then
+			left += 1
+		end
+	end
+	eq(left, 0, "all toasts expire")
+	noFailures(engine)
+end)
+
+test("huge balances are shown compactly instead of overflowing the pills", function()
+	local engine, player, client = session()
+	local profile = serverProfile(engine, player)
+	profile.coins = 987654321
+	profile.research = 123456
+	pushState(engine, player)
+	local text = textOf(client:hud())
+	truthy(string.find(text, "Coins  987.65M", 1, true), "coins compact")
+	truthy(string.find(text, "Research  123.4K", 1, true), "research compact")
 	noFailures(engine)
 end)
 

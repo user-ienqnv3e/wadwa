@@ -21,6 +21,19 @@ Ui.Colors = {
 	White = Color3.fromRGB(255, 255, 255),
 }
 
+-- Compact, width-stable number text for large values: 9876, 12.3K, 4.56M, 1.00B.
+function Ui.formatNumber(value: number): string
+	local n = math.floor(math.max(0, value))
+	if n < 10000 then
+		return tostring(n)
+	elseif n < 1e6 then
+		return string.format("%.1fK", math.floor(n / 100) / 10)
+	elseif n < 1e9 then
+		return string.format("%.2fM", math.floor(n / 1e4) / 100)
+	end
+	return string.format("%.2fB", math.floor(n / 1e7) / 100)
+end
+
 function Ui.new(className: string, props: { [string]: any }, children: { any }?): any
 	local inst = Instance.new(className)
 	for key, value in pairs(props) do
