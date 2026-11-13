@@ -24,7 +24,7 @@ local MEAL_RESEARCH_TIER = { 0, 6, 14 }
 local HABITAT_RESEARCH = { meadow = 1, grove = 4, lagoon = 9 }
 
 -- Crafted decorations: { recipeId, decorationId, inputs, researchGate }
-local CRAFTS = {
+local CRAFTS: { { any } } = {
 	{ "craft_jam_jar_lantern", "jam_jar_lantern", "dewberry_jam:2,honeycomb_chew:1", 8 },
 	{ "craft_oat_straw_wreath", "oat_straw_wreath", "oat_cluster:4,wild_strawberry:2", 6 },
 	{ "craft_corn_husk_doll", "corn_husk_doll", "golden_corn:3,corn_fritter:1", 10 },

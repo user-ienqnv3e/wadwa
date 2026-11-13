@@ -49,6 +49,7 @@ ActionService.init({
 	notify = notify,
 	ringBell = FeastService.ringFromPlayer,
 	summon = AnimalService.summon,
+	resync = StateService.requestFull,
 })
 SafetyService.init({ getProfile = getProfile, notify = notify })
 

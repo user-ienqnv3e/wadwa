@@ -629,13 +629,16 @@ Config.TutorialSteps = 4
 -- (FoodOrder, SpeciesOrder and UpgradeOrder stay the first-session content); the expansion is
 -- appended to the same Foods/Species/Upgrades maps so every shared rule handles it.
 --------------------------------------------------------------------------------
-local ContentFolder = if script then (script.Parent :: any).Content else nil
-local FoodsContent = if ContentFolder then require(ContentFolder.Foods) else require("./Content/Foods")
-local AnimalsContent = if ContentFolder then require(ContentFolder.Animals) else require("./Content/Animals")
-local RecipesContent = if ContentFolder then require(ContentFolder.Recipes) else require("./Content/Recipes")
-local DecorationsContent = if ContentFolder then require(ContentFolder.Decorations) else require("./Content/Decorations")
-local UpgradesContent = if ContentFolder then require(ContentFolder.Upgrades) else require("./Content/Upgrades")
-local QuestsContent = if ContentFolder then require(ContentFolder.Quests) else require("./Content/Quests")
+-- Lune (offline tests/bake) has no `script`; it loads the same files by relative path.
+local function requirePath(path: string): any
+	return (require :: any)(path)
+end
+local FoodsContent = if script then require(script.Parent.Content.Foods) else requirePath("./Content/Foods")
+local AnimalsContent = if script then require(script.Parent.Content.Animals) else requirePath("./Content/Animals")
+local RecipesContent = if script then require(script.Parent.Content.Recipes) else requirePath("./Content/Recipes")
+local DecorationsContent = if script then require(script.Parent.Content.Decorations) else requirePath("./Content/Decorations")
+local UpgradesContent = if script then require(script.Parent.Content.Upgrades) else requirePath("./Content/Upgrades")
+local QuestsContent = if script then require(script.Parent.Content.Quests) else requirePath("./Content/Quests")
 
 Config.FoodTags = {
 	sweet = { Name = "Sweet", Icon = "◆", Adjective = "sweet" },
@@ -677,7 +680,7 @@ end
 
 local function hintFor(foodId: string): string
 	local food = Config.Foods[foodId]
-	local adjective = Config.FoodTags[food.Tag].Adjective
+	local adjective: string = (Config.FoodTags :: any)[food.Tag].Adjective
 	return if food.Kind == "cooked"
 		then "Dreams of something " .. adjective .. ", cooked in the Kitchen."
 		else "Sniffs around for something " .. adjective .. ", picked fresh."

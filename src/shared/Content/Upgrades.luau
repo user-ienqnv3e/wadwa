@@ -53,7 +53,7 @@ type Spec = {
 	format: string,
 	coins: number, -- level-1 coin cost (later levels x2.5, x5)
 	research: number, -- level-1 research threshold (later levels +3, +7)
-	requires: { string | number }?, -- { upgradeId, level }
+	requires: { any }?, -- { upgradeId, level }
 	habitat: string?,
 }
 
@@ -89,7 +89,7 @@ local function specs(): { Spec }
 			format = "+%d%% trust from " .. lower .. " foods",
 			coins = c + 30,
 			research = r + 2,
-			requires = { "palate_" .. tag, 1 },
+			requires = { "palate_" .. tag, 1 :: any },
 		})
 		table.insert(list, {
 			id = "bargain_" .. tag,
@@ -103,7 +103,7 @@ local function specs(): { Spec }
 			format = "-%d%% batch cost for " .. lower .. " foods",
 			coins = c + 20,
 			research = r + 1,
-			requires = { "palate_" .. tag, 1 },
+			requires = { "palate_" .. tag, 1 :: any },
 		})
 		table.insert(list, {
 			id = "basket_" .. tag,
@@ -117,7 +117,7 @@ local function specs(): { Spec }
 			format = "+%d per " .. lower .. " batch",
 			coins = c + 40,
 			research = r + 3,
-			requires = { "bargain_" .. tag, 1 },
+			requires = { "bargain_" .. tag, 1 :: any },
 		})
 	end
 	for i, archetype in ipairs(ARCHETYPES) do
@@ -149,7 +149,7 @@ local function specs(): { Spec }
 			format = "+%d%% coins from " .. string.lower(n) .. "s",
 			coins = c + 40,
 			research = r + 2,
-			requires = { "rapport_" .. archetype, 1 },
+			requires = { "rapport_" .. archetype, 1 :: any },
 		})
 		table.insert(list, {
 			id = "mouth_" .. archetype,
@@ -163,7 +163,7 @@ local function specs(): { Spec }
 			format = "+%d%% catch radius on " .. string.lower(n) .. "s",
 			coins = c + 80,
 			research = r + 4,
-			requires = { "patron_" .. archetype, 1 },
+			requires = { "patron_" .. archetype, 1 :: any },
 		})
 	end
 	for i, habitat in ipairs(HABITATS) do
@@ -196,7 +196,7 @@ local function specs(): { Spec }
 			format = "+%d%% trust on this island",
 			coins = c + 40,
 			research = r + 2,
-			requires = { "market_" .. habitat, 1 },
+			requires = { "market_" .. habitat, 1 :: any },
 			habitat = habitat,
 		})
 		table.insert(list, {
@@ -211,7 +211,7 @@ local function specs(): { Spec }
 			format = "+%d research per new species",
 			coins = c + 20,
 			research = r + 1,
-			requires = { "market_" .. habitat, 1 },
+			requires = { "market_" .. habitat, 1 :: any },
 			habitat = habitat,
 		})
 		table.insert(list, {
@@ -226,7 +226,7 @@ local function specs(): { Spec }
 			format = "+%d%% comfort from decorations here",
 			coins = c + 60,
 			research = r + 3,
-			requires = { "kinship_" .. habitat, 1 },
+			requires = { "kinship_" .. habitat, 1 :: any },
 			habitat = habitat,
 		})
 	end
@@ -243,7 +243,7 @@ local function specs(): { Spec }
 			format = "+%d portions per " .. station[2] .. " recipe",
 			coins = 80 + 20 * (i - 1),
 			research = 6 + i,
-			requires = { "big_batches", 1 },
+			requires = { "big_batches", 1 :: any },
 		})
 	end
 	local singles: { Spec } = {
@@ -259,7 +259,7 @@ local function specs(): { Spec }
 			format = "+%d%% coins on Perfect catches",
 			coins = 60,
 			research = 3,
-			requires = { "steady_aim", 1 },
+			requires = { "steady_aim", 1 :: any },
 		},
 		{
 			id = "nice_toss_tips",
@@ -273,7 +273,7 @@ local function specs(): { Spec }
 			format = "+%d%% coins on Good hits",
 			coins = 70,
 			research = 4,
-			requires = { "perfect_payout", 1 },
+			requires = { "perfect_payout", 1 :: any },
 		},
 		{
 			id = "forager_finds",
@@ -299,7 +299,7 @@ local function specs(): { Spec }
 			format = "+%d trust on Perfect catches",
 			coins = 90,
 			research = 6,
-			requires = { "perfect_payout", 1 },
+			requires = { "perfect_payout", 1 :: any },
 		},
 		{
 			id = "feast_appetite",
@@ -324,7 +324,7 @@ local function specs(): { Spec }
 			format = "+%d%% feast reward coins",
 			coins = 100,
 			research = 6,
-			requires = { "feast_appetite", 1 },
+			requires = { "feast_appetite", 1 :: any },
 		},
 		{
 			id = "quest_bounty",
@@ -349,7 +349,7 @@ local function specs(): { Spec }
 			format = "+%d research per quest",
 			coins = 110,
 			research = 6,
-			requires = { "quest_bounty", 1 },
+			requires = { "quest_bounty", 1 :: any },
 		},
 		{
 			id = "keen_observer",
@@ -410,7 +410,7 @@ local function specs(): { Spec }
 			format = "+%d%% trust from visitors",
 			coins = 90,
 			research = 6,
-			requires = { "visitor_welcome", 1 },
+			requires = { "visitor_welcome", 1 :: any },
 		},
 	}
 	for _, s in ipairs(singles) do

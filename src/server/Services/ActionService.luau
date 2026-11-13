@@ -20,6 +20,7 @@ type Deps = {
 	notify: (Player, string, string?) -> (),
 	ringBell: (Player) -> boolean,
 	summon: (string, Player) -> (boolean, string),
+	resync: (Player) -> (),
 }
 
 local ActionService = {}
@@ -144,7 +145,7 @@ function ActionService.init(deps: Deps)
 			deps.ringBell(player)
 			return
 		elseif kind == "RequestState" then
-			deps.markDirty(player)
+			deps.resync(player)
 			return
 		elseif kind == "Cook" then
 			local id = stringField(payload, "id")

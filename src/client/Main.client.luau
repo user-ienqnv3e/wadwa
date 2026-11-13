@@ -3,6 +3,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local ProfileSync = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("ProfileSync"))
 local Controllers = script.Parent:WaitForChild("Controllers")
 local Store = require(Controllers:WaitForChild("Store"))
 local Effects = require(Controllers:WaitForChild("Effects"))
@@ -22,13 +23,30 @@ ThrowController.init()
 Hud.init()
 task.spawn(WorldVisuals.init)
 
+-- The server sends one full snapshot and then numbered deltas. A delta that doesn't follow the
+-- last message we applied (a missed message, a reconnect) is ignored and a fresh snapshot is
+-- requested, so the mirror can never silently drift from the server.
+local lastSeq = 0
+local resyncAsked = false
 StateRemote.OnClientEvent:Connect(function(payload)
-	if type(payload) ~= "table" or type(payload.profile) ~= "table" then
+	if type(payload) ~= "table" or type(payload.seq) ~= "number" then
 		return
 	end
-	Store.profile = payload.profile
+	if payload.full == true and type(payload.profile) == "table" then
+		Store.profile = payload.profile
+	elseif Store.profile ~= nil and payload.seq == lastSeq + 1 and type(payload.delta) == "table" then
+		ProfileSync.apply(Store.profile, payload.delta)
+	else
+		if not resyncAsked then
+			resyncAsked = true
+			ActionRemote:FireServer({ kind = "RequestState" })
+		end
+		return
+	end
+	lastSeq = payload.seq
+	resyncAsked = false
 	Store.persistence = payload.persistence
-	Store.emit("profile", payload.profile)
+	Store.emit("profile", Store.profile)
 end)
 
 NotifyRemote.OnClientEvent:Connect(function(payload)
