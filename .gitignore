@@ -3,3 +3,4 @@ sourcemap.json
 globalTypes.d.luau
 roblox.yml
 *.rbxl.lock
+tests/fuzz-failures/

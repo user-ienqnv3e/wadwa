@@ -5,9 +5,17 @@
 -- stale expectations), feast bells and DataStore failures, and checks invariants after every
 -- step. A failing seed is printed; add it to REGRESSION_SEEDS so it is replayed forever.
 --
--- Usage: lune run tests/fuzz.luau [place.rbxl] [extraSeedCount] [steps]
+-- Usage: lune run tests/fuzz.luau [place.rbxl] [extraSeedCount] [steps] [base] [onlySeed]
+--   base     : extra seeds derive from it (default: the clock); printed so a batch can be replayed
+--   onlySeed : run just this one seed (replay a failure)
+-- Env: FUZZ_DETERMINISM=1 runs every seed twice and reports the first step whose state digest
+--      differs (the simulator must replay a seed identically for a seed to be a valid repro).
+-- Every failure writes tests/fuzz-failures/seed-<seed>.log: build identity, the per-step PRNG
+-- draws (the complete replay input), per-step state digests, the error, warnings and failures.
 local process = require("@lune/process")
 local roblox = require("@lune/roblox")
+local fs = require("@lune/fs")
+local serde = require("@lune/serde")
 local Engine = require("./sim/Engine")
 
 local Vector3 = roblox.Vector3
@@ -21,9 +29,10 @@ local REGRESSION_SEEDS = { 1, 2, 42, 20261113, 1358208003 }
 
 local function lcg(seed)
 	local state = (math.floor(seed) % 2147483646) + 1
-	local r = {}
+	local r = { draws = {} }
 	function r.float()
 		state = (state * 48271) % 2147483647
+		table.insert(r.draws, state)
 		return state / 2147483647
 	end
 	function r.int(a, b)
@@ -124,14 +133,78 @@ local function check(engine, label, players)
 		assert(d <= a.habitat.Radius, label .. ": animal " .. a.id .. " left its island")
 	end
 	assert(engine:service("StateService").pendingCount() <= #engine.players.list, label .. ": dirty map holds departed players")
+	assert(engine:service("StateService").trackedCount() <= #engine.players.list, label .. ": sync copies leaked")
+	local decor = engine:service("DecorService")
+	assert(decor.modelCount() <= Config.Decor.Lanes * #Config.HabitatOrder * 12, label .. ": decoration models unbounded")
+	assert(#engine.workspace.WildFeastDecor:GetChildren() <= Config.Decor.Lanes, label .. ": garden folders leaked")
+	for _, player in ipairs(players) do
+		local profile = DataService.getProfile(player)
+		if profile then
+			-- Decoration ownership: never more placed than owned, own island only, inside the plots.
+			for habitatId, slots in pairs(profile.decorPlaced) do
+				for key, id in pairs(slots) do
+					local d = Config.Decorations[id]
+					assert(d and d.Habitat == habitatId, label .. ": decoration on the wrong island")
+					local slot = tonumber(string.sub(key, 2))
+					assert(slot and slot >= 1 and slot <= engine:shared("Economy").plots(Config, profile), label .. ": plot out of range")
+				end
+			end
+			for id, n in pairs(profile.decorOwned) do
+				assert(engine:shared("Economy").placedCount(profile, id) <= n, label .. ": placed more than owned")
+			end
+			assert(#profile.pinned <= Config.FoodBar.MaxPinned, label .. ": too many pins")
+			-- The client mirror rebuilt from every State message matches the server (once flushed).
+			local state = engine:lastState(player)
+			assert(state == nil or state.gaps == 0, label .. ": State sequence gap")
+		end
+	end
 	-- Server-side workspace growth must stay bounded (no leaked parts/folders per throw or event).
 	assert(#engine.workspace:GetChildren() < 40, label .. ": workspace children grew to " .. #engine.workspace:GetChildren())
 end
 
+-- Per-step state digest: everything a divergence would show up in first.
+local function digest(engine, DataService, players)
+	local parts = { string.format("t=%.3f q=%d seq=%d", engine.now, #engine.queue, engine.seq) }
+	local b = engine.backend
+	table.insert(parts, string.format("ds=%d/%d/%d", b.calls, b.writes, b.failNext))
+	local ids = {}
+	for _, p in ipairs(players) do
+		table.insert(ids, p)
+	end
+	table.sort(ids, function(x, y)
+		return x.UserId < y.UserId
+	end)
+	for _, p in ipairs(ids) do
+		local session = DataService.getSession(p)
+		local profile = session and session.profile
+		table.insert(
+			parts,
+			if profile
+				then string.format(
+					"%d:%s:%d:%d:%d:%s",
+					p.UserId,
+					session.mode,
+					profile.coins,
+					profile.research,
+					profile.stats.totalFeeds,
+					profile.selectedFood
+				)
+				else tostring(p.UserId) .. ":-"
+		)
+	end
+	return table.concat(parts, " ")
+end
+
+local currentTrace = nil -- { draws per step, digest per step } of the seed being run
+
 local function runSeed(seed)
 	local rng = lcg(seed)
+	local trace = { steps = {}, digests = {} }
+	currentTrace = trace
+
 	local backend = Engine.newBackend()
 	local engine = Engine.new({ place = PLACE, backend = backend })
+	trace.engine = engine
 	engine:startServer()
 	local Config = engine.config
 	local FeastService = engine:service("FeastService")
@@ -168,6 +241,12 @@ local function runSeed(seed)
 	end
 
 	for step = 1, STEPS do
+		if step > 1 then
+			trace.steps[step - 1] = rng.draws
+			trace.digests[step - 1] = digest(engine, DataService, players)
+		end
+		rng.draws = {}
+		trace.step = step
 		local label = string.format("seed %d step %d", seed, step)
 		local roll = rng.float()
 		if roll < 0.06 or #players == 0 then
@@ -245,8 +324,47 @@ local function runSeed(seed)
 					profile.coins = math.min(profile.coins + rng.int(0, 400), Config.Caps.Coins)
 					profile.research = math.min(profile.research + rng.int(0, 6), Config.Caps.Research)
 				end
-				local kinds = { "BuyUpgrade", "Restore", "BuyFood", "UnlockFood", "UnlockHabitat", "SelectFood" }
+				local kinds = { "BuyUpgrade", "Restore", "BuyFood", "UnlockFood", "UnlockHabitat", "SelectFood", "Expansion" }
 				local kind = rng.pick(kinds)
+				if kind == "Expansion" then
+					-- Expansion actions with real ids, sometimes repeated; the rules decide what succeeds.
+					profile.research = math.min(profile.research + 4, Config.Caps.Research)
+					local pick = rng.int(1, 7)
+					local payload
+					if pick == 1 then
+						payload = { kind = "Cook", id = rng.pick(Config.RecipeOrder), expect = 0 }
+						local recipe = Config.Recipes[payload.id]
+						payload.expect = profile.cooked[payload.id] or 0
+						for input, count in pairs(recipe.Inputs) do
+							if not Config.Foods[input].Free then
+								profile.unlockedFoods[input] = true
+								profile.inventory[input] = math.min((profile.inventory[input] or 0) + count, Config.Caps.FoodStack)
+							end
+						end
+					elseif pick == 2 then
+						payload = { kind = "ClaimQuest", id = rng.pick(Config.QuestOrder) }
+					elseif pick == 3 then
+						local id = rng.pick(Config.DecorationOrder)
+						payload = { kind = "BuyDecor", id = id, expect = profile.decorOwned[id] or 0 }
+					elseif pick == 4 then
+						local id = rng.pick(Config.DecorationOrder)
+						profile.decorOwned[id] = profile.decorOwned[id] or 1
+						payload = { kind = "PlaceDecor", id = id, habitat = Config.Decorations[id].Habitat, slot = rng.int(0, 14) }
+					elseif pick == 5 then
+						payload = { kind = "RemoveDecor", habitat = rng.pick(Config.HabitatOrder), slot = rng.int(1, 12) }
+					elseif pick == 6 then
+						local id = rng.pick(Config.VisitorOrder)
+						profile.lures[id] = 1
+						payload = { kind = "UseLure", id = id }
+					else
+						payload = { kind = "PinFood", id = rng.pick(Config.AllFoodOrder) }
+					end
+					for _ = 1, if rng.chance(0.3) then 2 else 1 do
+						engine:fireServer(p, "Action", payload)
+					end
+					engine:service("StateService").markDirty(p)
+					kind = "SelectFood"
+				end
 				local id, expect
 				if kind == "BuyUpgrade" then
 					id = rng.pick(Config.UpgradeOrder)
@@ -308,6 +426,9 @@ local function runSeed(seed)
 		end
 		lastState = state
 		check(engine, label, players)
+		if process.env.FUZZ_SELFTEST == "1" and step == 3 then
+			error(label .. ": deliberate self-test failure (FUZZ_SELFTEST=1)")
+		end
 		for _, p in ipairs(players) do
 			local profile = DataService.getProfile(p)
 			if profile then
@@ -318,6 +439,24 @@ local function runSeed(seed)
 
 	-- Persistence at the end: everything that was saving is saved and every lock released.
 	backend.failNext = 0
+	-- After the last push, every client's delta-rebuilt mirror equals its server profile.
+	local ProfileSync = engine:shared("ProfileSync")
+	for _, p in ipairs(players) do
+		if DataService.getProfile(p) then
+			engine:service("StateService").markDirty(p)
+		end
+	end
+	engine:advance(0.6)
+	for _, p in ipairs(players) do
+		local profile = DataService.getProfile(p)
+		local state = engine:lastState(p)
+		if profile and state then
+			assert(
+				ProfileSync.deepEqual(state.profile, Engine.remoteCopy(profile)),
+				string.format("seed %d: client mirror diverged for %d", seed, p.UserId)
+			)
+		end
+	end
 	local expected = {}
 	for _, p in ipairs(players) do
 		local session = DataService.getSession(p)
@@ -351,24 +490,107 @@ local function runSeed(seed)
 			end
 		end
 	end
-	return completedFeasts
+	trace.steps[STEPS] = rng.draws
+	trace.digests[STEPS] = digest(engine, DataService, players)
+	trace.final = digest(engine, DataService, players)
+	return completedFeasts, trace
+end
+
+local function sha(text: string): string
+	return serde.hash("sha256", text)
+end
+local gitRev = (function()
+	local ok, r = pcall(process.exec, "git", { "rev-parse", "--short", "HEAD" })
+	local rev = if ok and r.ok then (string.gsub(r.stdout, "%s", "")) else "unknown"
+	local okDiff, diff = pcall(process.exec, "git", { "status", "--porcelain", "--untracked-files=no" })
+	local dirty = okDiff and diff.ok and #diff.stdout > 0
+	return rev .. (if dirty then "+uncommitted" else "")
+end)()
+local placeHash = string.sub(sha(fs.readFile(PLACE)), 1, 16)
+local IDENTITY = string.format("git %s, place %s sha256:%s, steps %d", gitRev, PLACE, placeHash, STEPS)
+print("  (" .. IDENTITY .. ")")
+
+local function writeFailure(seed, err, trace)
+	fs.writeDir("tests/fuzz-failures")
+	local lines = {
+		"Fuzz failure",
+		"seed: " .. seed,
+		"identity: " .. IDENTITY,
+		"replay: lune run tests/fuzz.luau " .. PLACE .. " 0 " .. STEPS .. " 0 " .. seed,
+		"failed at step: " .. tostring(trace and trace.step),
+		"error: " .. tostring(err),
+		"",
+	}
+	if trace then
+		local engine = trace.engine
+		if engine then
+			table.insert(lines, "runtime failures:")
+			for _, f in ipairs(engine:failures()) do
+				table.insert(lines, "  " .. f)
+			end
+			table.insert(lines, "warnings (last 40):")
+			for i = math.max(1, #engine.warnings - 39), #engine.warnings do
+				table.insert(lines, "  " .. engine.warnings[i])
+			end
+		end
+		table.insert(lines, "steps (PRNG draws, then the state digest after the step):")
+		for step = 1, #trace.steps do
+			table.insert(lines, string.format("%4d draws=%s", step, table.concat(trace.steps[step], ",")))
+			table.insert(lines, "     " .. tostring(trace.digests[step]))
+		end
+	end
+	local path = "tests/fuzz-failures/seed-" .. seed .. ".log"
+	fs.writeFile(path, table.concat(lines, "\n") .. "\n")
+	return path
 end
 
 local seeds = table.clone(REGRESSION_SEEDS)
-local base = os.time()
+-- Extra seeds derive from a base (default: the clock). It is printed so any failing batch can be
+-- replayed exactly: lune run tests/fuzz.luau <place> <extra> <steps> <base>
+local base = tonumber(process.args[4]) or os.time()
+print(string.format("  (extra seed base %d)", base))
 for i = 1, EXTRA do
 	table.insert(seeds, (base * 7919 + i * 104729) % 2147483646)
 end
+local only = tonumber(process.args[5])
+if only then
+	seeds = { only }
+end
+local checkDeterminism = process.env.FUZZ_DETERMINISM == "1"
 
 local passed, failed = 0, 0
 for _, seed in ipairs(seeds) do
-	local ok, result = pcall(runSeed, seed)
+	print(string.format("  ..   seed %d", seed)) -- before running: a crash/hang still names the seed
+	currentTrace = nil
+	local ok, result, trace = pcall(runSeed, seed)
+	if ok and checkDeterminism then
+		local ok2, _, again = pcall(runSeed, seed)
+		if not ok2 then
+			ok, result = false, "replay of the same seed failed (nondeterministic): " .. tostring(_)
+			trace = currentTrace
+		else
+			for step = 1, STEPS do
+				local a, b = table.concat(trace.steps[step], ","), table.concat(again.steps[step], ",")
+				if a ~= b or trace.digests[step] ~= again.digests[step] then
+					ok = false
+					result = string.format(
+						"NONDETERMINISTIC at step %d\n         run 1: %s\n         run 2: %s",
+						step,
+						trace.digests[step],
+						again.digests[step]
+					)
+					break
+				end
+			end
+		end
+	end
 	if ok then
 		passed += 1
 		print(string.format("  ok   seed %d (%d steps, %d feasts completed)", seed, STEPS, result))
 	else
 		failed += 1
-		print(string.format("  FAIL seed %d\n       %s", seed, tostring(result)))
+		local path = writeFailure(seed, result, trace or currentTrace)
+		print(string.format("  FAIL seed %d\n       %s\n       trace: %s", seed, tostring(result), path))
 	end
 end
 print(string.format("\n%d seeds passed, %d failed", passed, failed))

@@ -133,6 +133,7 @@ local function finish(success: boolean)
 			local profile = player and deps.getProfile(player)
 			if player and profile then
 				paid[userId] = true
+				reward.coins = math.floor(reward.coins * (1 + Economy.modifier(Config, profile, "feastCoins") / 100) + 0.5)
 				Economy.addCoins(Config, profile, reward.coins)
 				Economy.addResearch(Config, profile, reward.research)
 				profile.stats.feastsJoined = math.min(profile.stats.feastsJoined + 1, Config.Caps.Counter)
@@ -169,7 +170,11 @@ function FeastService.contribute(player: Player, foodId: string): boolean
 	if not food then
 		return false
 	end
-	local points = FeastRules.pointsFor(food.Value)
+	local points = math.min(FeastRules.pointsFor(food.Value), Config.Feast.MaxPointsPerItem)
+	local profile = deps.getProfile(player)
+	if profile then
+		points = math.floor(points * (1 + Economy.modifier(Config, profile, "feastPoints") / 100) + 0.5)
+	end
 	contributions[player.UserId] = (contributions[player.UserId] or 0) + points
 	progress += points
 	dirty = true

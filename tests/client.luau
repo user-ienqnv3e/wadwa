@@ -535,6 +535,274 @@ for _, vp in ipairs({ Vector2.new(667, 375), Vector2.new(844, 390), Vector2.new(
 	end)
 end
 
+print("Expansion tabs")
+test("Kitchen, Quests and Decor tabs render, page, filter and send server-validated actions", function()
+	local engine, player, client = session()
+	local profile = richProfile(engine, player)
+	profile.stats.totalFeeds = 12
+	pushState(engine, player)
+	local Hud = client:controller("Hud")
+	for _, tab in ipairs({ "Kitchen", "Quests", "Decor" }) do
+		Hud.openPanel(tab)
+		engine:advance(0.3)
+		local _, content = panelContent(client)
+		truthy(content and string.find(textOf(content), "Page 1/", 1, true), tab .. " paged")
+		client:click(client:find("NextPage_" .. tab))
+		engine:advance(0.3)
+		truthy(string.find(textOf(content), "Page 2/", 1, true), tab .. " next page")
+		client:click(client:find("Filter_" .. tab))
+		engine:advance(0.3)
+		truthy(not string.find(textOf(content), "Filter: All", 1, true), tab .. " filtered")
+	end
+	Hud.openPanel("Quests")
+	engine:advance(0.3)
+	for _ = 1, 6 do -- filter -> Milestones
+		client:click(client:find("Filter_Quests"))
+		engine:advance(0.2)
+	end
+	client:click(client:find("NextPage_Quests"))
+	engine:advance(0.3)
+	local claim = client:find("Claim_feeds_1")
+	truthy(claim, "ready quest offers a claim button")
+	client:click(claim)
+	client:click(claim)
+	engine:advance(0.6)
+	eq(serverProfile(engine, player).questsClaimed.feeds_1, true, "claimed through the UI")
+	noFailures(engine)
+end)
+
+print("Catalog search, pinned food bar, profile deltas")
+test("search filters the catalog by name/description, combines with filters and paging, shows empty results", function()
+	local engine, player, client = session()
+	richProfile(engine, player)
+	local Hud = client:controller("Hud")
+	Hud.openPanel("Pantry")
+	engine:advance(0.3)
+	local box = client:find("SearchBox")
+	truthy(box and box:IsA("TextBox") and box.Visible, "search box on catalog tabs")
+	local _, content = panelContent(client)
+	client:type(box, "jam")
+	engine:advance(0.2)
+	local text = textOf(content)
+	truthy(string.find(text, "Dewberry Jam", 1, true), "match by name")
+	truthy(not string.find(text, "Clover Bun", 1, true), "non-matches hidden")
+	truthy(client:find("SearchBox") == box, "the box is never rebuilt (typing keeps focus)")
+	-- A state push while typing never overwrites the text or rebuilds the box.
+	client:type(box, "jam j")
+	pushState(engine, player)
+	eq(box.Text, "jam j", "text kept across refresh")
+	client:type(box, "zzqx")
+	engine:advance(0.2)
+	truthy(client:find("NoResults"), "empty results message")
+	truthy(string.find(textOf(content), "No matches for", 1, true), "explains the empty result")
+	-- Description search + category filter + paging together.
+	client:type(box, "sea")
+	engine:advance(0.2)
+	local unfiltered = textOf(content)
+	client:click(client:find("Filter_Pantry")) -- core
+	client:click(client:find("Filter_Pantry")) -- harvest
+	engine:advance(0.2)
+	local filtered = textOf(content)
+	truthy(string.find(filtered, "Filter: harvest", 1, true) and string.find(filtered, "Sea Grape", 1, true), "harvest + search")
+	truthy(string.find(unfiltered, "Made by the", 1, true), "unfiltered search includes cooked dishes")
+	truthy(not string.find(filtered, "Made by the", 1, true), "cooked filtered out")
+	-- Each tab keeps its own query.
+	Hud.openPanel("Quests")
+	engine:advance(0.2)
+	eq(box.Text, "", "quests tab has its own (empty) query")
+	Hud.openPanel("Pantry")
+	engine:advance(0.2)
+	eq(box.Text, "sea", "pantry query restored")
+	-- Typing in the box never triggers hotkeys (Roblox marks those key presses as processed).
+	Hud.closePanel()
+	client:keyDown(Enum.KeyCode.P, true)
+	engine:advance(0.2)
+	truthy(not client:find("PanelHolder"):FindFirstChildOfClass("Frame").Visible, "processed keys ignored")
+	noFailures(engine)
+end)
+
+test("pins are saved by the server and drive the HUD bar; the bar pages, number keys and pads select safely", function()
+	local engine, player, client = session()
+	local profile = richProfile(engine, player)
+	for _, id in ipairs({ "mango", "dewberry_jam", "acorn", "truffle", "papaya", "lime", "coconut" }) do
+		profile.unlockedFoods[id] = true
+		profile.inventory[id] = 5
+	end
+	pushState(engine, player)
+	local Hud = client:controller("Hud")
+	Hud.openPanel("Pantry")
+	engine:advance(0.2)
+	client:type(client:find("SearchBox"), "mango")
+	engine:advance(0.2)
+	client:click(client:find("Pin_mango"))
+	client:click(client:find("Pin_mango")) -- double tap: one request
+	engine:advance(0.8)
+	eq(table.concat(serverProfile(engine, player).pinned, ","), "mango", "pinned once on the server")
+	truthy(client:find("Food_mango"), "pinned food is on the bar")
+	truthy(string.find(client:find("Food_mango").Text, "📌", 1, true), "pin marker")
+	-- With more stocked foods than slots, the bar pages.
+	truthy(client:find("FoodNext") and client:find("FoodPrev"), "page arrows")
+	local Store = client:controller("Store")
+	eq(#Store.barFoods, 5, "5 foods + arrows fit the bar width")
+	local firstPage = table.concat(Store.barFoods, ",")
+	client:click(client:find("FoodNext"))
+	engine:advance(0.2)
+	truthy(table.concat(Store.barFoods, ",") ~= firstPage, "next page shows other foods")
+	-- Number keys pick from what is on screen.
+	local onScreen = Store.barFoods[2]
+	client:keyDown(Enum.KeyCode.Two)
+	engine:advance(0.6)
+	eq(serverProfile(engine, player).selectedFood, onScreen, "key 2 selects the 2nd visible food")
+	-- Gamepad R1 cycles through every bar food.
+	local before = serverProfile(engine, player).selectedFood
+	client:gamepadDown(Enum.KeyCode.ButtonR1)
+	engine:advance(0.6)
+	truthy(serverProfile(engine, player).selectedFood ~= before, "R1 cycles")
+	truthy(table.find(Store.barFoods, serverProfile(engine, player).selectedFood), "the selection stays visible")
+	-- Touch: tapping a bar button selects it.
+	local target = Store.barFoods[1]
+	client:click(client:find("Food_" .. target))
+	engine:advance(0.6)
+	eq(serverProfile(engine, player).selectedFood, target, "tap selects")
+	-- Hostile pins are refused by the server.
+	client:send("Action", table.pack({ kind = "PinFood", id = "sunberry" }))
+	client:send("Action", table.pack({ kind = "PinFood", id = "starlight_sushi" }))
+	engine:advance(0.6)
+	eq(#serverProfile(engine, player).pinned, 1, "free / unknown-to-player foods can't be pinned")
+	noFailures(engine)
+end)
+
+test("the client mirror follows deltas exactly and resyncs after a missed message", function()
+	local engine, player, client = session()
+	local ProfileSync = engine:shared("ProfileSync")
+	local Store = client:controller("Store")
+	local profile = serverProfile(engine, player)
+	for i = 1, 6 do
+		profile.coins += 100
+		profile.inventory.clover_bun = i
+		profile.unlockedFoods.clover_bun = true
+		profile.pinned = if i % 2 == 0 then { "clover_bun" } else {}
+		pushState(engine, player)
+	end
+	truthy(ProfileSync.deepEqual(Store.profile, engine.remoteCopy(profile)), "mirror equals server")
+	-- Simulate a lost message: deliver a delta that skips ahead. It's ignored and a snapshot asked for.
+	local sent = #client:sentOf("Action")
+	client:deliver("State", { { seq = 999, full = false, delta = { set = { coins = 1 } }, persistence = "DataStore" } })
+	engine:advance(0.6)
+	truthy(Store.profile.coins ~= 1, "out-of-order delta not applied")
+	truthy(#client:sentOf("Action") > sent, "resync requested")
+	engine:advance(0.6)
+	truthy(ProfileSync.deepEqual(Store.profile, engine.remoteCopy(profile)), "mirror equals server after resync")
+	-- Malformed State payloads never crash the client.
+	client:deliver("State", { "junk" })
+	client:deliver("State", { { seq = "x" } })
+	engine:advance(0.3)
+	noFailures(engine)
+end)
+
+print("QA pass 4 regressions")
+test("a dropped resync request is retried, so the mirror can't stay frozen after a gap", function()
+	local engine, player, client = session()
+	local ProfileSync = engine:shared("ProfileSync")
+	local Store = client:controller("Store")
+	local profile = serverProfile(engine, player)
+	engine:advance(4)
+	-- One real delta is lost on the way down, and the client's resync request is lost on the way up.
+	client.dropIncoming = { State = 1 }
+	client.dropOutgoing = { Action = 1 }
+	profile.coins += 5
+	pushState(engine, player)
+	engine:advance(0.5)
+	for i = 1, 8 do
+		profile.coins += 10
+		profile.inventory.clover_bun = i
+		profile.unlockedFoods.clover_bun = true
+		pushState(engine, player)
+		engine:advance(0.5)
+	end
+	truthy(ProfileSync.deepEqual(Store.profile, engine.remoteCopy(profile)), "mirror recovered after a lost resync request")
+	noFailures(engine)
+end)
+
+test("stale or duplicate snapshots never roll the mirror back", function()
+	local engine, player, client = session()
+	local Store = client:controller("Store")
+	local profile = serverProfile(engine, player)
+	profile.coins = 777
+	pushState(engine, player)
+	engine:advance(0.5)
+	eq(Store.profile.coins, 777)
+	client:deliver("State", { { seq = 1, full = true, profile = { coins = 3 }, persistence = "DataStore" } })
+	engine:advance(0.3)
+	eq(Store.profile.coins, 777, "old snapshot (seq 1) ignored")
+	noFailures(engine)
+end)
+
+test("bar & search edges: unpin selected, last item falls back, wrap paging, long/pattern queries, respawn", function()
+	local engine, player, client = session()
+	local profile = richProfile(engine, player)
+	for _, id in ipairs({ "mango", "dewberry_jam", "acorn", "truffle", "papaya", "lime", "coconut" }) do
+		profile.unlockedFoods[id] = true
+		profile.inventory[id] = 5
+	end
+	profile.pinned = { "mango" }
+	profile.selectedFood = "mango"
+	profile.inventory.mango = 1
+	pushState(engine, player)
+	local Store = client:controller("Store")
+	local Hud = client:controller("Hud")
+	truthy(table.find(Store.barFoods, "mango"), "selected pinned food visible")
+	-- Unpinning the selected food keeps it selected and on the bar.
+	client:send("Action", table.pack({ kind = "PinFood", id = "mango" }))
+	engine:advance(0.6)
+	eq(#serverProfile(engine, player).pinned, 0, "unpinned")
+	truthy(table.find(Store.barFoods, "mango"), "still shown while selected")
+	-- Throwing the last one falls back to the free food, and the bar shows it.
+	client:keyDown(Enum.KeyCode.F)
+	engine:advance(0.5)
+	client:keyUp(Enum.KeyCode.F)
+	engine:advance(1.5)
+	eq(serverProfile(engine, player).selectedFood, "sunberry", "fallback to the free food")
+	eq(Store.profile.selectedFood, "sunberry", "mirror follows")
+	truthy(table.find(Store.barFoods, "sunberry"), "free food visible")
+	-- Paging wraps both ways.
+	local pagesSeen = {}
+	for _ = 1, 6 do
+		pagesSeen[table.concat(Store.barFoods, ",")] = true
+		client:click(client:find("FoodPrev"))
+		engine:advance(0.1)
+	end
+	local n = 0
+	for _ in pairs(pagesSeen) do
+		n += 1
+	end
+	truthy(n >= 2, "prev wraps through the pages")
+	-- Long query with Lua pattern characters: no error, clamped, empty result shown.
+	Hud.openPanel("Kitchen")
+	engine:advance(0.2)
+	local box = client:find("SearchBox")
+	client:type(box, string.rep("%[(.*", 60))
+	engine:advance(0.2)
+	truthy(#box.Text <= 40, "query clamped to 40 characters (got " .. #box.Text .. ")")
+	truthy(client:find("NoResults"), "empty result")
+	-- A tab without search hides the box; coming back restores that tab's query.
+	Hud.openPanel("Map")
+	engine:advance(0.2)
+	eq(box.Visible, false, "no search on Map")
+	Hud.openPanel("Kitchen")
+	engine:advance(0.2)
+	eq(box.Visible, true)
+	truthy(#box.Text > 0, "kitchen query kept")
+	client:type(box, "")
+	engine:advance(0.2)
+	truthy(not client:find("NoResults"), "clearing shows everything again")
+	-- Respawning keeps the bar and the panel state working.
+	engine:spawnCharacter(player)
+	engine:advance(1)
+	truthy(#Store.barFoods >= 1 and client:find("Food_sunberry"), "bar survives respawn")
+	noFailures(engine)
+end)
+
 print(string.format("\n%d passed, %d failed", passed, failed))
 if failed > 0 then
 	process.exit(1)

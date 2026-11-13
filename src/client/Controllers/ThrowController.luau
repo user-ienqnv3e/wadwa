@@ -205,12 +205,7 @@ local function selectRelative(step: number)
 	if not profile then
 		return
 	end
-	local unlocked = {}
-	for _, id in ipairs(Config.FoodOrder) do
-		if profile.unlockedFoods[id] then
-			table.insert(unlocked, id)
-		end
-	end
+	local unlocked = if #Store.allBarFoods > 0 then Store.allBarFoods else { profile.selectedFood }
 	local index = table.find(unlocked, profile.selectedFood) or 1
 	local nextId = unlocked[((index - 1 + step) % #unlocked) + 1]
 	Store.emit("selectFood", nextId)
@@ -296,7 +291,7 @@ function ThrowController.init()
 		elseif input.KeyCode == Enum.KeyCode.ButtonL1 then
 			selectRelative(-1)
 		elseif NUMBER_KEYS[input.KeyCode] then
-			local id = Config.FoodOrder[NUMBER_KEYS[input.KeyCode]]
+			local id = Store.barFoods[NUMBER_KEYS[input.KeyCode]]
 			if id and Store.profile and Store.profile.unlockedFoods[id] then
 				Store.emit("selectFood", id)
 			end

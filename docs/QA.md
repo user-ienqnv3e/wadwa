@@ -110,3 +110,90 @@ Result: ✅ pass · ⚠ gap (not verifiable here). Method: S = Sim, U = Unit, St
 - The per-key write throttle model errors instead of queueing, which is stricter than Roblox.
 - Animals move through decorative props (anchored CFrame movement, no pathfinding). Stuck recovery only covers lack of progress.
 - The local gate-open state is client-side by design. The server enforces access by bouncing players out of locked islands.
+
+## Expansion pass (PR #4): 1,000 content additions, then the four follow-up gaps
+
+All checks below are **offline**: unit/content rules in Lune, plus the engine simulator running the
+real scripts from the built place. Roblox Studio is not available on this Linux host, so nothing here
+was rendered, physically simulated, networked for real, or played on a device.
+
+| Gap | Implementation | Regressions |
+|---|---|---|
+| Decoration rendering | `DecorService` (server) builds placed pieces with `DecorFactory` into `Workspace.WildFeastDecor/Garden_<UserId>`, so all players see them (replicated like any Workspace part). Each player in the server gets one of `Config.Decor.Lanes` (6) interleaved plot rings per island. Models are diffed against the owner's saved `decorPlaced` (only changed plots are rebuilt) and destroyed when the owner leaves. Parts are anchored and have CanCollide, CanQuery and CanTouch off; ≤ 6 parts per model, ≤ 6 × 3 × 12 models in total. A player beyond the lane limit keeps the effects and is told their pieces aren't drawn. | integration: plot transform on its island, swap, hostile placement, another player can't remove it, cleanup on leave, rejoin rebuilds the saved garden, lane bound + notice; fuzz: model and folder bounds, ownership invariants |
+| Food bar pinning | The HUD bar comes from `Economy.barFoods`: free food, selection, the **server-saved** `pinned` list, core foods, then every other stocked food, in pages. With more than 6 foods it shows 5 foods + ◀ ▶ (fits the original 780-px bar). Keys 1–6 pick visible slots; Q/L1/R1 cycle all bar foods and the page follows the selection; touch taps select. The Pantry has Pin/Unpin and Select. | client: pin via the Pantry (double tap sends once), 📌 marker, paging, key 2 = 2nd visible, R1 cycles and stays visible, tap selects, hostile pins refused; unit: bar bounds, pin cap |
+| Menu search | One persistent `SearchBox` above the panel content (never rebuilt, so typing keeps focus; refreshes never overwrite its text). There is one query per tab, combined with that tab's category filter and paging, with an explicit empty-results row. It covers Pantry (156 foods), Kitchen (200), Quests (300), Decor (150), Upgrades (105) and Journal (106 species, with visitor lure buttons). Hotkeys ignore keys Roblox marks as processed (typing). | client: name/description matches, filter + search + paging, empty results, refresh during typing, per-tab queries, processed keys ignored |
+| Efficient profile updates | `ProfileSync` (shared, pure). The server sends one full snapshot on join and on `RequestState`, then sequenced deltas per top-level section: whole replacement for scalars/arrays, a second-level `set` + `del` patch for maps (deletions travel as key lists because nil can't cross a remote). Unchanged pushes are skipped. A client that sees a gap ignores the delta and requests a snapshot. Each player has a private server-side copy, released on leave. | unit: 3,000-step seeded diff/apply fuzz through JSON (nested deletions, arrays), malformed deltas; integration: contiguous seqs, mirror == server, deletions, no cross-player state, skip/resync/cleanup; client: mirror == server, gap → resync, junk payloads; fuzz: no gaps, final mirror == server for every player |
+
+**Payload measurements (JSON-encoded bytes in tests; not live network numbers):**
+- Late-game profile (156 foods, 106 species, 300 quests claimed): full snapshot **18,635 B**. Typical deltas: one feed **180 B**, one cook **141 B**, placing a decoration **67 B**.
+- Simulator (fresh profile, 14 mixed changes): full snapshot 634 B, largest delta 201 B.
+- Worst-case maxed save: 38,166 B of JSON.
+
+**Tooling this pass.**
+- selene had no execute bit in the local mise install (`chmod +x`, not a repo change). It now runs: 0 errors, plus 6 style warnings, all in lines that predate the expansion.
+- luau-lsp was run against the downloaded Roblox `globalTypes.d.luau`. It found ~190 strict-mode type errors in the expansion data and Config loader (mixed-type rows, the Lune-only string require). These are fixed and the result is now **0 errors**.
+
+**Still not verified:** visual appearance and placement of decorations in a real renderer, actual replication timing, touch/gamepad feel of the paged bar, TextBox focus behaviour on real devices, real network byte counts.
+
+## QA pass 4 (expansion follow-up audit)
+
+Offline only (Lune unit/content suites plus the engine simulator on the built place). No Roblox Studio, renderer, device or real network is available on this Linux host.
+
+**Defects found and fixed.** Each has a regression that was confirmed **failing on the pre-fix build** (built from the previous commit in a worktree) and passing after the fix.
+
+| # | Defect (reproduced) | Fix | Regression |
+|---|---|---|---|
+| 1 | Any client could force a full snapshot (~18.6 KB late-game) on every `RequestState`, limited only by the action rate limiter: 30 requests in 3 s → 12 snapshots. | Snapshots answer resyncs at most every `Config.Remote.FullSnapshotInterval` (2 s). Ordinary deltas keep flowing while one waits, so joins aren't delayed. | integration: spam → ≤ 3 snapshots; changes still arrive promptly during the throttle window |
+| 2 | Lost resync: after a real gap, the client asked once. If that request was lost (or throttled), every later delta was ignored forever and the mirror froze. | The client re-asks after 3 s while it is still out of sync. | client: one State delta and the RequestState are both dropped in transit → mirror recovers |
+| 3 | A stale or duplicate full snapshot (seq ≤ last applied) replaced a newer mirror. | Snapshots are applied only when `seq > lastSeq`. | client: old seq-1 snapshot ignored |
+| 4 | Decoration lanes: a 7th player waiting for a lane was never drawn when one freed up; they had to change a placement to be drawn. | Freeing a lane hands it to a waiting player (deferred out of PlayerRemoving). | integration: waiting player drawn when a lane frees; models stay bounded |
+| 5 | `SelectFood` accepted an out-of-stock food (likelier with pins), so every throw then failed silently with `no_food`. | The server refuses with a notice and keeps the current selection. | integration: empty food refused + notice; stocked food selects |
+
+**Probed with no defect found** (now covered by tests): unpinning the selected food; the last item thrown falling back to the free food with the bar following; ◀/▶ paging wrap; a 300-character query of Lua pattern characters (plain find, clamped to 40, empty-results row); Map (a non-search tab) hiding the box and restoring the per-tab query; bar and panel surviving respawn; the rejoin garden rebuild alongside lane hand-off.
+
+**Six-player decoration limit (unchanged by design).** `Config.Decor.Lanes = 6` gardens are drawn per server.
+- **Over the limit:** a 7th player's pieces keep every gameplay effect, and they are told they aren't drawn.
+- **Handover:** they now get the next freed lane automatically.
+- **Bounds:** models never exceed 6 × 3 × 12, with ≤ 6 inert parts each. Fuzz checks the model count, the garden folder count, ownership (never more placed than owned), islands and plot ranges.
+
+**Simulator shims added:** `client.dropIncoming` / `client.dropOutgoing` drop server→client and client→server messages to test recovery. The delta tests compare against the real server profile (an independent oracle), not the harness's own merge.
+
+**Fuzz reproducibility:** extra seeds came from `os.time()` and the base wasn't printed. One batch in this pass reported a failure whose seed was lost (only the summary line was kept). The base is now printed and accepted as the 4th argument. 21 seeds at fixed base 1763047000 and a further 10 at base 1794584187, all × 250 steps, passed. That one failure is **unresolved**: its seed is unknown and it could not be reproduced in the time available.
+
+**Final evidence** (two consecutive clean full passes after the last source change): unit 34/34, content 20/20 (1,000 counts, cross-references, reachability, manifest sync, ProfileSync fuzz), server simulator 57/57, client simulator 28/28, fuzz 10 + 21 seeds, StyLua clean, selene 0 errors (6 pre-existing style warnings), luau-lsp strict 0 errors. `WildFeastIslands.rbxl` was rebuilt byte-identically twice and reopened by `verify-place` with source parity.
+
+## Investigation: the unreproduced fuzz failure from QA pass 4
+
+**Original evidence.** None survived. That batch's output was only tailed (the summary line), so its seed, step and error were never recorded. `/tmp/fz*.txt` on the host are later clean reruns. From the commit and run timestamps, its extra-seed base was `os.time()` somewhere in **1794583140–1794583320** (2026-11-13 15:19–15:22 UTC), with 6 extra seeds per base. That's about 1,080 candidate seeds at ~30 s each, so I did not search blind. **The original failure remains unreproduced and its specific cause is unknown.** Clean batches since then are not proof that it is resolved.
+
+**Diagnostics added first** (`tests/fuzz.luau`, before any further randomized runs):
+- **Header:** build identity (git commit, with `+uncommitted` if the tree is dirty, and the place file's SHA-256).
+- **Per seed:** the seed is printed *before* it runs, so a crash or hang still names it.
+- **Per step:** every PRNG draw (the complete replay input) and a state digest (virtual clock, scheduler queue length and sequence, DataStore calls/writes/pending failures, and each player's mode/coins/research/feeds/selection).
+- **On failure:** `tests/fuzz-failures/seed-<seed>.log` with the replay command, failing step, error, runtime failures, the last 40 warnings and the full per-step trace.
+- **Replay and determinism:** run a single seed with `lune run tests/fuzz.luau <place> 0 <steps> 0 <seed>`. `FUZZ_DETERMINISM=1` runs every seed twice and reports the first step whose draws or digest differ.
+- **Self-test:** `FUZZ_SELFTEST=1` forces a failure at step 3 to check the logging path; it was verified.
+
+**Harness and stand-in audit.**
+- The simulator virtualises `os.clock`, `os.time`, `Random` and the task scheduler (FIFO by time, then sequence number).
+- `math.random` is used only for a Studio job id (not used in the fuzz).
+- Remaining source of variation: iteration order over tables keyed by player objects, which follows memory addresses.
+
+**Root cause found: the seed did not fully determine the run (reproducibility defect).**
+- **Mechanism:** autosave and `BindToClose` started one save per session in `pairs(sessions)` order. The fuzz's DataStore outage injection (`failNext`) fails the next N `UpdateAsync` calls, so *which players' saves failed* depended on memory addresses.
+- **Measurement:** 12 identical runs (5 players, 2 injected failures, one autosave round) produced **6 different outcomes**.
+- **Consequence:** any fuzz failure that depends on which save fails could vanish on replay. This mechanism can explain why the original failure couldn't be replayed. It is not shown to be its cause.
+- **Production impact:** saves are independent, and Roblox itself guarantees no ordering, so this isn't a correctness bug in a live server.
+- **Fix:**
+  - DataService (autosave, shutdown) and StateService (push order) now iterate in UserId order.
+  - DecorService's lane handover now goes to the player who has waited longest (ties by UserId), instead of whichever entry `pairs` produced first.
+- **Regression:** "identical sessions replay identically" runs the scenario 6 times and expects one outcome. It **fails on the pre-fix build** and passes now. The lane-fairness test passes on both builds (the old order happened to pick correctly), so it guards behaviour but isn't a proven pre-fix failure.
+
+**Classification:** reproducibility/simulator-ordering defect, with production code made deterministic. No production correctness defect was found. No invariant was weakened.
+
+**Runs after the fix (offline Lune simulator; not Roblox):**
+- `FUZZ_DETERMINISM=1`, base 1794700000, 8 seeds (1, 2, 42, 20261113, 1358208003, 182635501, 182740230, 182844959) × 250 steps: all replay identically and pass.
+- Base 1794583230 (inside the original failure's base window), 11 seeds × 250 steps: pass (extra seeds 1405417517–1405941162).
+- Unit 34/34, content 20/20, server 59/59, client 28/28, twice. StyLua clean, selene 0 errors (6 pre-existing style warnings), luau-lsp strict 0 errors. `verify-place`: all 35 scripts match their sources, and two consecutive rebuilds are byte-identical.
+
+**Coverage limits:** only 1 of ~180 candidate bases from the original window was sampled. The fuzz uses at most 6 user ids, so the 7th-player decoration waiting path is covered by integration tests, not fuzz. No Studio, renderer, device or real network was available.

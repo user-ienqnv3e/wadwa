@@ -571,14 +571,31 @@ function Engine:fireServer(player, remoteName, ...)
 	instanceSignal(remote, "OnServerEvent"):Fire(player, table.unpack(args, 1, args.n))
 end
 
+-- The server sends a full snapshot followed by numbered deltas. This rebuilds what a client that
+-- applied every State message in order would hold (using the same shared ProfileSync rules) and
+-- returns it in the old { profile, persistence, persistenceReason } shape, plus the last raw
+-- message and the merge's sequence health.
 function Engine:lastState(player)
-	for i = #player.inbox, 1, -1 do
-		local m = player.inbox[i]
+	local ProfileSync = self:shared("ProfileSync")
+	local profile, last, seq, gaps = nil, nil, 0, 0
+	for _, m in ipairs(player.inbox) do
 		if m.remote == "State" then
-			return m.args[1]
+			local msg = m.args[1]
+			if msg.full then
+				profile = Engine.deepCopy(msg.profile)
+			elseif profile and msg.seq == seq + 1 then
+				ProfileSync.apply(profile, Engine.deepCopy(msg.delta))
+			else
+				gaps += 1
+			end
+			seq = msg.seq
+			last = msg
 		end
 	end
-	return nil
+	if not last then
+		return nil
+	end
+	return { profile = profile, persistence = last.persistence, persistenceReason = last.persistenceReason, raw = last, gaps = gaps }
 end
 
 function Engine:messages(player, remoteName, filter)

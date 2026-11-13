@@ -385,7 +385,22 @@ test("a player using only free food and sensible choices reaches every goal", fu
 		if goal.id == "befriend" then
 			break
 		end
-		if goal.id == "feast" then
+		if goal.id == "quest_ready" then
+			for _, id in ipairs(Config.QuestOrder) do
+				Economy.tryClaimQuest(Config, profile, id)
+			end
+		elseif goal.id == "first_cook" then
+			Economy.tryUnlockFood(Config, profile, "dewberry")
+			Economy.grantFood(Config, profile, "dewberry", 2)
+			truthy(Economy.tryCook(Config, profile, "cook_dewberry_jam"), "cooked the first recipe")
+		elseif goal.id == "first_lure" then
+			Economy.grantFood(Config, profile, "dewberry", 2)
+			Economy.grantFood(Config, profile, "clover_sprig", 2)
+			Economy.grantFood(Config, profile, Config.HarvestByHabitat.meadow[10], 2)
+			truthy(Economy.tryCook(Config, profile, "lure_dewhop"), "made a lure")
+			truthy(Economy.canUseLure(Config, profile, "dewhop"), "lure usable")
+			Economy.consumeLure(Config, profile, "dewhop") -- the server's AnimalService does the calling
+		elseif goal.id == "feast" then
 			local rewards = FeastRules.computeRewards(Config.Feast, { [1] = Config.Feast.BaseGoal }, true)
 			Economy.addCoins(Config, profile, rewards[1].coins)
 			Economy.addResearch(Config, profile, rewards[1].research)
@@ -429,7 +444,7 @@ test("a player using only free food and sensible choices reaches every goal", fu
 	for _, id in ipairs(Config.UpgradeOrder) do
 		eq(Economy.upgradeLevel(profile, id), #Config.Upgrades[id].Levels, id .. " maxed")
 	end
-	for _, id in ipairs({ "first_feed", "first_upgrade", "unlock_grove", "unlock_lagoon", "feast", "discover" }) do
+	for _, id in ipairs({ "first_feed", "first_upgrade", "unlock_grove", "unlock_lagoon", "feast", "discover", "first_cook", "first_lure" }) do
 		truthy(seen[id], "goal " .. id .. " was shown on the way")
 	end
 end)

@@ -43,6 +43,10 @@ local function installShims()
 	roblox.implementProperty("PlayerGui", "ChildAdded", function(self)
 		return instanceSignal(self, "ChildAdded")
 	end)
+	-- TextBox text edits: tests call client:type(box, text), which sets Text and fires this.
+	roblox.implementMethod("TextBox", "GetPropertyChangedSignal", function(self, prop)
+		return instanceSignal(self, "Changed:" .. prop)
+	end)
 	roblox.implementMethod("Camera", "GetPropertyChangedSignal", function(self, prop)
 		return instanceSignal(self, "Changed:" .. prop)
 	end)
@@ -260,6 +264,12 @@ end
 
 -- Server -> this client, after the simulated latency.
 function Client:deliver(remoteName, args)
+	-- Tests can lose server -> client messages too (client.dropIncoming[remote] = n).
+	local drop = self.dropIncoming and self.dropIncoming[remoteName]
+	if drop and drop > 0 then
+		self.dropIncoming[remoteName] = drop - 1
+		return
+	end
 	local remote = self.engine.remotes:FindFirstChild(remoteName)
 	local co = coroutine.create(function()
 		instanceSignal(remote, "OnClientEvent"):Fire(table.unpack(args))
@@ -274,6 +284,12 @@ function Client:send(remoteName, args)
 		copied[i] = Engine.remoteCopy(args[i])
 	end
 	table.insert(self.sent, { remote = remoteName, args = copied, at = self.engine.now })
+	-- Tests can make messages vanish in transit (client.dropOutgoing[remote] = n) to check recovery.
+	local drop = self.dropOutgoing and self.dropOutgoing[remoteName]
+	if drop and drop > 0 then
+		self.dropOutgoing[remoteName] = drop - 1
+		return
+	end
 	local engine, player = self.engine, self.player
 	local co = coroutine.create(function()
 		engine:fireServer(player, remoteName, table.unpack(copied, 1, args.n))
@@ -359,6 +375,13 @@ function Client:hud()
 end
 
 -- Finds a descendant GuiObject of the HUD by name.
+-- Types into a TextBox the way Roblox reports it: the Text property changes and its changed signal
+-- fires (once per call; real typing fires per keystroke, which tests can mimic with several calls).
+function Client:type(box, text)
+	box.Text = text
+	instanceSignal(box, "Changed:Text"):Fire()
+end
+
 function Client:find(name)
 	local hud = self:hud()
 	return hud and hud:FindFirstChild(name, true)

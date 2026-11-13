@@ -6,7 +6,7 @@
 
 local Config = {}
 
-Config.Version = "1.0.0"
+Config.Version = "1.1.0"
 
 --------------------------------------------------------------------------------
 -- Persistence
@@ -14,7 +14,7 @@ Config.Version = "1.0.0"
 Config.Data = {
 	StoreName = "WildFeastIslands_Profiles_v1",
 	KeyPrefix = "player_",
-	SchemaVersion = 2,
+	SchemaVersion = 3, -- v3 adds kitchen, lures, quests, decorations and the pinned food bar
 	LoadRetries = 4, -- bounded attempts per load
 	SaveRetries = 3, -- bounded attempts per save
 	RetryBaseDelay = 1.5, -- seconds, doubled per attempt
@@ -113,11 +113,18 @@ export type FoodDef = {
 	Size: number,
 	Icon: string, -- glyph shown next to the name (non-colour cue)
 	Description: string,
+	Kind: string, -- "core" | "harvest" (learned + prepared in the Pantry) | "cooked" (Kitchen only)
+	Tag: string, -- flavour family used by preferences, upgrades and filters
+	Habitat: string?,
+	Tier: number?,
+	Inputs: { [string]: number }?,
 }
 
 Config.Foods = {
 	sunberry = {
 		Id = "sunberry",
+		Kind = "core",
+		Tag = "fruity",
 		Name = "Sunberry",
 		Order = 1,
 		Value = 1,
@@ -132,6 +139,8 @@ Config.Foods = {
 	},
 	clover_bun = {
 		Id = "clover_bun",
+		Kind = "core",
+		Tag = "leafy",
 		Name = "Clover Bun",
 		Order = 2,
 		Value = 1.5,
@@ -146,6 +155,8 @@ Config.Foods = {
 	},
 	honey_drop = {
 		Id = "honey_drop",
+		Kind = "core",
+		Tag = "sweet",
 		Name = "Honey Drop",
 		Order = 3,
 		Value = 2,
@@ -160,6 +171,8 @@ Config.Foods = {
 	},
 	fern_roll = {
 		Id = "fern_roll",
+		Kind = "core",
+		Tag = "nutty",
 		Name = "Fern Roll",
 		Order = 4,
 		Value = 2.5,
@@ -175,6 +188,8 @@ Config.Foods = {
 	},
 	kelp_bundle = {
 		Id = "kelp_bundle",
+		Kind = "core",
+		Tag = "salty",
 		Name = "Kelp Bundle",
 		Order = 5,
 		Value = 3,
@@ -190,6 +205,8 @@ Config.Foods = {
 	},
 	starfruit = {
 		Id = "starfruit",
+		Kind = "core",
+		Tag = "sour",
 		Name = "Starfruit",
 		Order = 6,
 		Value = 4,
@@ -299,6 +316,8 @@ export type SpeciesDef = {
 	SenseRadius: number,
 	Description: string,
 	Hint: string, -- journal hint shown before the favourite is discovered
+	Visitor: boolean?, -- expansion species that arrive through visitor slots or lures
+	Feature: string?,
 }
 
 Config.Species = {
@@ -427,7 +446,7 @@ Config.Species = {
 Config.SpeciesOrder = { "puffhop", "waddlebill", "mossback", "glimmerfox", "bubblefin", "pinchpearl" }
 
 Config.Animal = {
-	MaxActive = 24, -- hard cap on server-simulated animals
+	MaxActive = 26, -- hard cap on server-simulated animals (19 residents + visitor slots)
 	TickRate = 15, -- AI/movement updates per second
 	EatDuration = 1.6,
 	HappyDuration = 1.6,
@@ -458,6 +477,9 @@ export type UpgradeDef = {
 	BaseValue: number,
 	Levels: { UpgradeLevel },
 	Format: string, -- how to display Value
+	Effect: { Kind: string, Target: string?, Unit: string }?, -- expansion upgrades only
+	Requires: { Id: string, Level: number }?,
+	RequiresHabitat: string?,
 }
 
 Config.Upgrades = {
@@ -563,6 +585,7 @@ Config.Feast = {
 	MaxShareMultipleOfAverage = 2.0, -- no single player may take more than 2x an equal share
 	FailureRewardFraction = 0.4, -- consolation if the timer runs out
 	BellRange = 22,
+	MaxPointsPerItem = 5, -- one cooked dish can't finish a solo feast on its own
 }
 
 --------------------------------------------------------------------------------
@@ -573,7 +596,8 @@ Config.Remote = {
 	ActionBurst = 12,
 	ThrowBurst = 3, -- extra buffer on top of the upgrade-driven cooldown
 	MaxStringLength = 32,
-	StatePushInterval = 0.25, -- minimum seconds between full state pushes to one client
+	StatePushInterval = 0.25, -- minimum seconds between state pushes to one client
+	FullSnapshotInterval = 2, -- a client's resync requests are answered at most this often
 }
 
 --------------------------------------------------------------------------------
@@ -599,5 +623,160 @@ Config.SettingsOrder = { "sound", "reducedEffects", "tutorial" }
 
 -- Tutorial steps the client may report as completed (server only stores the max step).
 Config.TutorialSteps = 4
+
+--------------------------------------------------------------------------------
+-- Expansion content (src/shared/Content): 100 visitors, 150 foods, 200 recipes, 300 quests,
+-- 150 decorations and 100 upgrades. The core tables above keep their original ids and order
+-- (FoodOrder, SpeciesOrder and UpgradeOrder stay the first-session content); the expansion is
+-- appended to the same Foods/Species/Upgrades maps so every shared rule handles it.
+--------------------------------------------------------------------------------
+-- Lune (offline tests/bake) has no `script`; it loads the same files by relative path.
+local function requirePath(path: string): any
+	return (require :: any)(path)
+end
+local FoodsContent = if script then require(script.Parent.Content.Foods) else requirePath("./Content/Foods")
+local AnimalsContent = if script then require(script.Parent.Content.Animals) else requirePath("./Content/Animals")
+local RecipesContent = if script then require(script.Parent.Content.Recipes) else requirePath("./Content/Recipes")
+local DecorationsContent = if script then require(script.Parent.Content.Decorations) else requirePath("./Content/Decorations")
+local UpgradesContent = if script then require(script.Parent.Content.Upgrades) else requirePath("./Content/Upgrades")
+local QuestsContent = if script then require(script.Parent.Content.Quests) else requirePath("./Content/Quests")
+
+Config.FoodTags = {
+	sweet = { Name = "Sweet", Icon = "◆", Adjective = "sweet" },
+	fruity = { Name = "Fruity", Icon = "●", Adjective = "fruity" },
+	leafy = { Name = "Leafy", Icon = "♣", Adjective = "leafy and green" },
+	nutty = { Name = "Nutty", Icon = "◉", Adjective = "nutty and crunchy" },
+	salty = { Name = "Salty", Icon = "≈", Adjective = "salty" },
+	savory = { Name = "Savory", Icon = "■", Adjective = "hearty and savory" },
+	floral = { Name = "Floral", Icon = "✿", Adjective = "floral and fragrant" },
+	spicy = { Name = "Spicy", Icon = "▲", Adjective = "spicy" },
+	earthy = { Name = "Earthy", Icon = "◍", Adjective = "earthy" },
+	sour = { Name = "Sour", Icon = "◐", Adjective = "sour and tangy" },
+}
+Config.FoodTagOrder = UpgradesContent.Tags
+Config.ArchetypeNames = UpgradesContent.ArchetypeNames
+
+local tagIcons = {}
+for id, tag in pairs(Config.FoodTags) do
+	tagIcons[id] = tag.Icon
+end
+local expansionFoods, expansionFoodOrder = FoodsContent.build(#Config.FoodOrder, tagIcons)
+Config.CoreFoodOrder = table.clone(Config.FoodOrder)
+Config.ExpansionFoodOrder = expansionFoodOrder
+Config.AllFoodOrder = table.clone(Config.FoodOrder)
+for _, id in ipairs(expansionFoodOrder) do
+	Config.Foods[id] = expansionFoods[id]
+	table.insert(Config.AllFoodOrder, id)
+end
+Config.HarvestByHabitat = { meadow = {}, grove = {}, lagoon = {} } :: { [string]: { string } }
+Config.CookedOrder = {} :: { string }
+for _, id in ipairs(expansionFoodOrder) do
+	local food = Config.Foods[id]
+	if food.Kind == "harvest" then
+		table.insert(Config.HarvestByHabitat[food.Habitat :: string], id)
+	else
+		table.insert(Config.CookedOrder, id)
+	end
+end
+
+local function hintFor(foodId: string): string
+	local food = Config.Foods[foodId]
+	local adjective: string = (Config.FoodTags :: any)[food.Tag].Adjective
+	return if food.Kind == "cooked"
+		then "Dreams of something " .. adjective .. ", cooked in the Kitchen."
+		else "Sniffs around for something " .. adjective .. ", picked fresh."
+end
+local visitors, visitorOrder = AnimalsContent.build(#Config.SpeciesOrder, hintFor)
+Config.VisitorOrder = visitorOrder
+Config.AllSpeciesOrder = table.clone(Config.SpeciesOrder)
+for _, id in ipairs(visitorOrder) do
+	Config.Species[id] = visitors[id]
+	table.insert(Config.AllSpeciesOrder, id)
+end
+
+local decorations, decorationOrder = DecorationsContent.build()
+Config.Decorations = decorations
+Config.DecorationOrder = decorationOrder
+
+local habitatNames = {}
+for id, habitat in pairs(Config.Habitats) do
+	habitatNames[id] = habitat.Name
+end
+local recipes, recipeOrder =
+	RecipesContent.build(Config.Foods, Config.CookedOrder, Config.Species, visitorOrder, decorations, Config.HarvestByHabitat, habitatNames)
+Config.Recipes = recipes
+Config.RecipeOrder = recipeOrder
+Config.StationOrder = { "Hearth", "Oven", "Steamer", "Mixing Bowl", "Smokehouse", "Lure Bench", "Workbench" }
+
+local upgrades, upgradeOrder = UpgradesContent.build(#Config.UpgradeOrder)
+Config.ExpansionUpgradeOrder = upgradeOrder
+Config.AllUpgradeOrder = table.clone(Config.UpgradeOrder)
+for _, id in ipairs(upgradeOrder) do
+	Config.Upgrades[id] = upgrades[id]
+	table.insert(Config.AllUpgradeOrder, id)
+end
+Config.UpgradeCategoryOrder = { "Throw", "Prep", "Cuisine", "Bonds", "Stewardship", "Kitchen", "Mastery" }
+-- Effect index: Effect kind -> target ("" when untargeted) -> upgrade ids (built once).
+Config.UpgradesByEffect = {} :: { [string]: { [string]: { string } } }
+for _, id in ipairs(upgradeOrder) do
+	local effect = Config.Upgrades[id].Effect :: any
+	local byTarget = Config.UpgradesByEffect[effect.Kind] or {}
+	Config.UpgradesByEffect[effect.Kind] = byTarget
+	local key = effect.Target or ""
+	byTarget[key] = byTarget[key] or {}
+	table.insert(byTarget[key], id)
+end
+
+local quests, questOrder = QuestsContent.build({
+	species = Config.Species,
+	coreSpecies = Config.SpeciesOrder,
+	visitorOrder = visitorOrder,
+	foods = Config.Foods,
+	recipes = recipes,
+	recipeOrder = recipeOrder,
+	decorations = decorations,
+	decorationOrder = decorationOrder,
+	upgrades = Config.Upgrades,
+	habitats = Config.Habitats,
+	habitatOrder = Config.HabitatOrder,
+})
+Config.Quests = quests
+Config.QuestOrder = questOrder
+Config.QuestGroupOrder = { "Visitors", "Friends", "Kitchen", "Decor", "Upgrades", "Islands", "Milestones" }
+
+-- Visiting animals: a few rotating slots per island, plus lures that call a chosen visitor.
+Config.Visitors = {
+	SlotsPerHabitat = 2,
+	RotateSeconds = 150, -- an un-lured slot moves on to the island's next visitor this often
+	LuredStaySeconds = 240, -- a lured visitor stays at least this long
+	LureLockSeconds = 45, -- a freshly lured slot can't be taken over by another lure this soon
+	MaxLures = 5, -- lures of one species a player can carry
+}
+
+Config.Decor = {
+	BasePlots = 6, -- plots per island (Garden Planner adds more)
+	MaxOwnedEach = 3, -- copies of one decoration a player can own
+	ComfortCoinPct = 0.75, -- % extra coins on an island per comfort point placed there
+	MaxComfortCoinPct = 30,
+	PlotRadiusFraction = 0.78, -- plots ring the island at this fraction of its radius
+	Lanes = 6, -- players whose gardens are drawn at once (each gets an interleaved ring of plots)
+	MaxPartsPerModel = 6,
+}
+
+Config.Kitchen = {
+	MaxCookPerRequest = 1, -- one cook per request; repeated taps carry `expect`
+}
+
+-- Ceilings for the stacked expansion bonuses (upgrades, comfort, favoured decorations).
+Config.Bonus = {
+	MaxCoinPct = 300, -- total extra coins from expansion bonuses on one meal
+	MaxTrustPct = 200,
+	MaxCatchPct = 25,
+}
+
+Config.FoodBar = {
+	Slots = 6, -- food buttons on the HUD bar (keys 1-6)
+	MaxPinned = 4, -- foods a player can pin to the bar
+}
 
 return Config

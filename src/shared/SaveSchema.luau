@@ -11,6 +11,10 @@ export type Stats = {
 	feastsJoined: number,
 	feastsCompleted: number,
 	coinsEarned: number,
+	mealsCooked: number,
+	luresUsed: number,
+	batchesPrepared: number,
+	questsClaimed: number,
 }
 
 export type Profile = {
@@ -30,6 +34,13 @@ export type Profile = {
 	settings: { [string]: any },
 	tutorialStep: number,
 	selectedFood: string,
+	-- v3 (expansion)
+	cooked: { [string]: number }, -- recipeId -> times cooked
+	lures: { [string]: number }, -- visitor speciesId -> lures carried
+	decorOwned: { [string]: number }, -- decorationId -> copies owned (placed ones included)
+	decorPlaced: { [string]: { [string]: string } }, -- habitatId -> "p<slot>" -> decorationId
+	questsClaimed: { [string]: boolean },
+	pinned: { string }, -- foods pinned to the HUD food bar, in order
 }
 
 local function finiteNonNegative(value: any, cap: number): number
@@ -63,10 +74,26 @@ function SaveSchema.default(config: any): Profile
 		fedCount = {},
 		discoveries = {},
 		seenSpecies = {},
-		stats = { totalFeeds = 0, perfectCatches = 0, feastsJoined = 0, feastsCompleted = 0, coinsEarned = 0 },
+		stats = {
+			totalFeeds = 0,
+			perfectCatches = 0,
+			feastsJoined = 0,
+			feastsCompleted = 0,
+			coinsEarned = 0,
+			mealsCooked = 0,
+			luresUsed = 0,
+			batchesPrepared = 0,
+			questsClaimed = 0,
+		},
 		settings = settings,
 		tutorialStep = 0,
 		selectedFood = "sunberry",
+		cooked = {},
+		lures = {},
+		decorOwned = {},
+		decorPlaced = {},
+		questsClaimed = {},
+		pinned = {},
 	}
 end
 
@@ -99,6 +126,21 @@ local MIGRATIONS: { [number]: (any) -> any } = {
 			data.restoration = {}
 		end
 		data.schemaVersion = 2
+		return data
+	end,
+	-- v2 had no kitchen, lures, quests, decorations or pinned foods. Everything a v2 save holds is
+	-- kept as-is; the new tables start empty (quest progress is computed from the existing stats,
+	-- so long-time players can claim milestones they already reached).
+	[2] = function(data: any): any
+		for _, key in ipairs({ "cooked", "lures", "decorOwned", "decorPlaced", "questsClaimed" }) do
+			if type(data[key]) ~= "table" then
+				data[key] = {}
+			end
+		end
+		if type(data.pinned) ~= "table" then
+			data.pinned = {}
+		end
+		data.schemaVersion = 3
 		return data
 	end,
 }
@@ -188,14 +230,28 @@ function SaveSchema.sanitize(config: any, data: any): Profile
 		local count = finiteNonNegative(value, caps.Counter)
 		return if count > 0 then count else nil
 	end)
-	profile.discoveries = readMap(data.discoveries, config.Species, function(value)
+	profile.discoveries = readMap(data.discoveries, config.Species, function(value, speciesId)
 		if type(value) ~= "table" then
 			return nil
 		end
 		local foods = {}
 		local any = false
-		for foodId in pairs(config.Foods) do
-			if value[foodId] == true then
+		-- Only journal-tracked pairs are kept (see Economy.tracksDiscovery): every core food for a
+		-- resident species, otherwise just the favourite and disliked foods.
+		local species = config.Species[speciesId]
+		local candidates: { string } = {}
+		if not species.Visitor then
+			for _, foodId in ipairs(config.FoodOrder) do
+				table.insert(candidates, foodId)
+			end
+		end
+		for foodId in pairs(species.Preferences) do
+			if not table.find(candidates, foodId) then
+				table.insert(candidates, foodId)
+			end
+		end
+		for _, foodId in ipairs(candidates) do
+			if value[foodId] == true and config.Foods[foodId] then
 				foods[foodId] = true
 				any = true
 			end
@@ -218,6 +274,71 @@ function SaveSchema.sanitize(config: any, data: any): Profile
 		end
 	end
 	profile.tutorialStep = finiteNonNegative(data.tutorialStep, config.TutorialSteps)
+
+	-- v3 expansion tables
+	if config.Recipes then
+		profile.cooked = readMap(data.cooked, config.Recipes, function(value)
+			local count = finiteNonNegative(value, caps.Counter)
+			return if count > 0 then count else nil
+		end)
+		profile.lures = readMap(data.lures, config.Species, function(value, key)
+			if not config.Species[key].Visitor then
+				return nil
+			end
+			local count = finiteNonNegative(value, config.Visitors.MaxLures)
+			return if count > 0 then count else nil
+		end)
+		profile.decorOwned = readMap(data.decorOwned, config.Decorations, function(value)
+			local count = finiteNonNegative(value, config.Decor.MaxOwnedEach)
+			return if count > 0 then count else nil
+		end)
+		profile.questsClaimed = readMap(data.questsClaimed, config.Quests, function(value)
+			return if value == true then true else nil
+		end)
+		-- Placements: own island only, within the plots this profile has, never more copies placed
+		-- than owned.
+		local plots = config.Decor.BasePlots
+		for _, id in ipairs((config.UpgradesByEffect.plots or {})[""] or {}) do
+			local level = profile.upgrades[id]
+			if level then
+				plots += config.Upgrades[id].Levels[level].Value
+			end
+		end
+		local placedOf: { [string]: number } = {}
+		local placed = {}
+		if type(data.decorPlaced) == "table" then
+			for _, habitatId in ipairs(config.HabitatOrder) do
+				local source = data.decorPlaced[habitatId]
+				if type(source) == "table" then
+					local slots = {}
+					for slot = 1, plots do
+						local key = "p" .. slot
+						local id = source[key]
+						local deco = type(id) == "string" and config.Decorations[id]
+						if deco and deco.Habitat == habitatId and (placedOf[id] or 0) < (profile.decorOwned[id] or 0) then
+							placedOf[id] = (placedOf[id] or 0) + 1
+							slots[key] = id
+						end
+					end
+					if next(slots) then
+						placed[habitatId] = slots
+					end
+				end
+			end
+		end
+		profile.decorPlaced = placed
+		local pinned = {}
+		if type(data.pinned) == "table" then
+			for i = 1, math.min(#data.pinned, config.FoodBar.MaxPinned) do
+				local id = data.pinned[i]
+				local food = type(id) == "string" and config.Foods[id]
+				if food and not food.Free and profile.unlockedFoods[id] and not table.find(pinned, id) then
+					table.insert(pinned, id)
+				end
+			end
+		end
+		profile.pinned = pinned
+	end
 	if type(data.selectedFood) == "string" and profile.unlockedFoods[data.selectedFood] then
 		profile.selectedFood = data.selectedFood
 	end
