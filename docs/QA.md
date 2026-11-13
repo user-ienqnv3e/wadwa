@@ -161,3 +161,39 @@ Offline only (Lune unit/content suites plus the engine simulator on the built pl
 **Fuzz reproducibility:** extra seeds came from `os.time()` and the base wasn't printed. One batch in this pass reported a failure whose seed was lost (only the summary line was kept). The base is now printed and accepted as the 4th argument. 21 seeds at fixed base 1763047000 and a further 10 at base 1794584187, all × 250 steps, passed. That one failure is **unresolved**: its seed is unknown and it could not be reproduced in the time available.
 
 **Final evidence** (two consecutive clean full passes after the last source change): unit 34/34, content 20/20 (1,000 counts, cross-references, reachability, manifest sync, ProfileSync fuzz), server simulator 57/57, client simulator 28/28, fuzz 10 + 21 seeds, StyLua clean, selene 0 errors (6 pre-existing style warnings), luau-lsp strict 0 errors. `WildFeastIslands.rbxl` was rebuilt byte-identically twice and reopened by `verify-place` with source parity.
+
+## Investigation: the unreproduced fuzz failure from QA pass 4
+
+**Original evidence.** None survived. That batch's output was only tailed (the summary line), so its seed, step and error were never recorded. `/tmp/fz*.txt` on the host are later clean reruns. From the commit and run timestamps, its extra-seed base was `os.time()` somewhere in **1794583140–1794583320** (2026-11-13 15:19–15:22 UTC), with 6 extra seeds per base. That's about 1,080 candidate seeds at ~30 s each, so I did not search blind. **The original failure remains unreproduced and its specific cause is unknown.** Clean batches since then are not proof that it is resolved.
+
+**Diagnostics added first** (`tests/fuzz.luau`, before any further randomized runs):
+- **Header:** build identity (git commit, with `+uncommitted` if the tree is dirty, and the place file's SHA-256).
+- **Per seed:** the seed is printed *before* it runs, so a crash or hang still names it.
+- **Per step:** every PRNG draw (the complete replay input) and a state digest (virtual clock, scheduler queue length and sequence, DataStore calls/writes/pending failures, and each player's mode/coins/research/feeds/selection).
+- **On failure:** `tests/fuzz-failures/seed-<seed>.log` with the replay command, failing step, error, runtime failures, the last 40 warnings and the full per-step trace.
+- **Replay and determinism:** run a single seed with `lune run tests/fuzz.luau <place> 0 <steps> 0 <seed>`. `FUZZ_DETERMINISM=1` runs every seed twice and reports the first step whose draws or digest differ.
+- **Self-test:** `FUZZ_SELFTEST=1` forces a failure at step 3 to check the logging path; it was verified.
+
+**Harness and stand-in audit.**
+- The simulator virtualises `os.clock`, `os.time`, `Random` and the task scheduler (FIFO by time, then sequence number).
+- `math.random` is used only for a Studio job id (not used in the fuzz).
+- Remaining source of variation: iteration order over tables keyed by player objects, which follows memory addresses.
+
+**Root cause found: the seed did not fully determine the run (reproducibility defect).**
+- **Mechanism:** autosave and `BindToClose` started one save per session in `pairs(sessions)` order. The fuzz's DataStore outage injection (`failNext`) fails the next N `UpdateAsync` calls, so *which players' saves failed* depended on memory addresses.
+- **Measurement:** 12 identical runs (5 players, 2 injected failures, one autosave round) produced **6 different outcomes**.
+- **Consequence:** any fuzz failure that depends on which save fails could vanish on replay. This mechanism can explain why the original failure couldn't be replayed. It is not shown to be its cause.
+- **Production impact:** saves are independent, and Roblox itself guarantees no ordering, so this isn't a correctness bug in a live server.
+- **Fix:**
+  - DataService (autosave, shutdown) and StateService (push order) now iterate in UserId order.
+  - DecorService's lane handover now goes to the player who has waited longest (ties by UserId), instead of whichever entry `pairs` produced first.
+- **Regression:** "identical sessions replay identically" runs the scenario 6 times and expects one outcome. It **fails on the pre-fix build** and passes now. The lane-fairness test passes on both builds (the old order happened to pick correctly), so it guards behaviour but isn't a proven pre-fix failure.
+
+**Classification:** reproducibility/simulator-ordering defect, with production code made deterministic. No production correctness defect was found. No invariant was weakened.
+
+**Runs after the fix (offline Lune simulator; not Roblox):**
+- `FUZZ_DETERMINISM=1`, base 1794700000, 8 seeds (1, 2, 42, 20261113, 1358208003, 182635501, 182740230, 182844959) × 250 steps: all replay identically and pass.
+- Base 1794583230 (inside the original failure's base window), 11 seeds × 250 steps: pass (extra seeds 1405417517–1405941162).
+- Unit 34/34, content 20/20, server 59/59, client 28/28, twice. StyLua clean, selene 0 errors (6 pre-existing style warnings), luau-lsp strict 0 errors. `verify-place`: all 35 scripts match their sources, and two consecutive rebuilds are byte-identical.
+
+**Coverage limits:** only 1 of ~180 candidate bases from the original window was sampled. The fuzz uses at most 6 user ids, so the 7th-player decoration waiting path is covered by integration tests, not fuzz. No Studio, renderer, device or real network was available.
