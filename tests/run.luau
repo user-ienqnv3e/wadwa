@@ -74,6 +74,15 @@ test("invalid throws are rejected (types, NaN, inf, ranges, unknown food)", func
 		eq(req, nil, "case " .. i)
 	end
 end)
+test("client-reported throw origin is used only when finite and near the server's head", function()
+	local head = Vector3.new(10, 8, 10)
+	local near = head + Vector3.new(3, 0, 0)
+	eq(Validation.pickOrigin(near, head, 6), near, "near origin kept")
+	eq(Validation.pickOrigin(head + Vector3.new(7, 0, 0), head, 6), head, "far origin replaced")
+	eq(Validation.pickOrigin(Vector3.new(NaN, 0, 0), head, 6), head, "NaN replaced")
+	eq(Validation.pickOrigin("here", head, 6), head, "wrong type replaced")
+	eq(Validation.pickOrigin(nil, head, 6), head, "missing replaced")
+end)
 test("action payload validation", function()
 	local kinds = { BuyFood = true }
 	eq((Validation.parseAction(kinds, 32, { kind = "BuyFood", id = "clover_bun" })), "BuyFood")

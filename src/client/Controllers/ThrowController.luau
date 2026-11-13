@@ -102,8 +102,9 @@ function ThrowController.release(source: string)
 	local profile = Store.profile
 	local power = Trajectory.chargePower(os.clock() - chargeStart, Config.Throw.ChargeTime, Config.Throw.PowerFloor, Config.Throw.PingPong)
 	local direction = aimDirection()
+	local origin = head()
 	ThrowController.cancel()
-	if not profile then
+	if not profile or not origin then
 		return
 	end
 	if ThrowController.cooldownRemaining() > 0 then
@@ -116,7 +117,9 @@ function ThrowController.release(source: string)
 		return
 	end
 	cooldownUntil = os.clock() + Economy.throwCooldown(Config, profile)
-	ThrowRemote:FireServer(foodId, direction, power)
+	-- The head position is sent so the server launches from where this client previewed the arc
+	-- (its own copy of a moving character lags); the server only accepts it within a few studs.
+	ThrowRemote:FireServer(foodId, direction, power, origin)
 end
 
 local function updatePreview()

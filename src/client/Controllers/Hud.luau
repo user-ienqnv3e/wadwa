@@ -9,6 +9,7 @@ local RunService = game:GetService("RunService")
 local GuiService = game:GetService("GuiService")
 local UserInputService = game:GetService("UserInputService")
 local ContextActionService = game:GetService("ContextActionService")
+local ProximityPromptService = game:GetService("ProximityPromptService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Config = require(ReplicatedStorage.Shared.Config)
@@ -47,6 +48,17 @@ local panelContent: ScrollingFrame
 local tabButtons: { [string]: TextButton } = {}
 local currentTab = "Pantry"
 local worldMarker: BillboardGui
+local throwCluster: Frame
+local menuCluster: Frame
+local centreCluster: Frame
+-- Unscaled sizes of the fixed HUD clusters (multiplied by the shared UIScale).
+local RESOURCES_HEIGHT = 130
+local SIDE_CLUSTER_WIDTH = 320 -- the goal card; the resources column (250) is narrower
+local MENU_BUTTON_HEIGHT = 74
+local MENU_GAP = 6
+local throwTouch: InputObject? = nil -- the touch currently holding the THROW button
+local hudKey = "" -- fingerprint of what the HUD last rendered (skip identical rebuilds)
+local panelKey = ""
 
 local TABS = { "Pantry", "Upgrades", "Map", "Journal", "Settings" }
 local TAB_KEYS = { Pantry = "P", Upgrades = "U", Map = "M", Journal = "J", Settings = "O" }
@@ -60,6 +72,28 @@ local function send(kind: string, fields: { [string]: any }?)
 		end
 	end
 	ActionRemote:FireServer(payload)
+end
+
+-- Deterministic text form of a (small, acyclic) value, used to skip rebuilding UI when nothing it
+-- shows has changed. Rebuilding destroys buttons, which can swallow a tap that is in progress.
+local function fingerprint(value: any): string
+	if type(value) ~= "table" then
+		return tostring(value)
+	end
+	local keys = {}
+	for k in pairs(value) do
+		table.insert(keys, tostring(k))
+	end
+	table.sort(keys)
+	local parts = table.create(#keys)
+	for _, k in ipairs(keys) do
+		local v = value[k]
+		if v == nil then
+			v = value[tonumber(k) :: any]
+		end
+		table.insert(parts, k .. "=" .. fingerprint(v))
+	end
+	return "{" .. table.concat(parts, ",") .. "}"
 end
 
 function Hud.toast(text: string, kind: string?)
@@ -103,14 +137,72 @@ local function cluster(name: string, props: { [string]: any }): Frame
 	return frame
 end
 
+-- Roblox's default touch jump button (PlayerModule TouchJump) is 70px at (1,-95, 1,-90) on small
+-- screens (shorter side <= 500px) and 120px at (1,-170, 1,-210) otherwise. Prefer the live button
+-- when it exists; fall back to those numbers.
+local function layoutThrowButton()
+	if not throwCluster then
+		return
+	end
+	local viewport = workspace.CurrentCamera.ViewportSize
+	local small = math.min(viewport.X, viewport.Y) <= 500
+	local rightInset = if small then 25 else 50
+	local bottomInset = if small then 90 else 210
+	local playerGui = player:FindFirstChildOfClass("PlayerGui")
+	local touchGui = playerGui and playerGui:FindFirstChild("TouchGui")
+	local frame = touchGui and touchGui:FindFirstChild("TouchControlFrame")
+	local jump = frame and frame:FindFirstChild("JumpButton") :: GuiObject?
+	if jump and jump.AbsoluteSize.X > 0 and gui.AbsoluteSize.X > 0 then
+		local hudRight = gui.AbsolutePosition.X + gui.AbsoluteSize.X
+		local hudBottom = gui.AbsolutePosition.Y + gui.AbsoluteSize.Y
+		rightInset = math.max(0, hudRight - (jump.AbsolutePosition.X + jump.AbsoluteSize.X))
+		bottomInset = math.max(0, hudBottom - jump.AbsolutePosition.Y)
+	end
+	throwCluster.Position = UDim2.new(1, -rightInset, 1, -(bottomInset + 12))
+end
+
+-- Size of the HUD's drawable area (inside the core UI / device safe insets), falling back to the
+-- viewport before the first layout pass.
+local function screenSize(): Vector2
+	local ok, size = pcall(function()
+		return gui.AbsoluteSize
+	end)
+	if ok and typeof(size) == "Vector2" and size.X > 0 and size.Y > 0 then
+		return size
+	end
+	return workspace.CurrentCamera.ViewportSize
+end
+
+-- The menu column starts below the resource pills and its buttons shrink (down to a 44px touch
+-- target) so it fits short phone screens; the centre column narrows so toasts and banners never
+-- slide under the goal card or the resources.
+local function layoutColumns(s: number)
+	if not menuCluster or not centreCluster then
+		return
+	end
+	local size = screenSize()
+	local top = 8 + RESOURCES_HEIGHT * s + 8
+	local available = (size.Y - top - 8) / s
+	local buttonHeight = math.clamp(math.floor((available - MENU_GAP * (#TABS - 1)) / #TABS), 44, MENU_BUTTON_HEIGHT)
+	menuCluster.Position = UDim2.fromOffset(8, top)
+	menuCluster.Size = UDim2.fromOffset(92, buttonHeight * #TABS + MENU_GAP * (#TABS - 1))
+	for _, button in pairs(menuButtons) do
+		button.Size = UDim2.fromOffset(92, buttonHeight)
+	end
+	local centreWidth = math.clamp(size.X / s - 2 * (SIDE_CLUSTER_WIDTH + 16), 240, 460)
+	centreCluster.Size = UDim2.fromOffset(centreWidth, 300)
+end
+
 local function updateScale()
 	local viewport = workspace.CurrentCamera.ViewportSize
 	local s = math.clamp(math.min(viewport.X / 1100, viewport.Y / 640), 0.6, 1.3)
 	for _, scale in ipairs(scales) do
 		scale.Scale = s
 	end
+	layoutColumns(s)
 	-- Panel uses offset sizes that fit the scaled viewport on any device.
 	panel.Size = UDim2.fromOffset(math.min(780, viewport.X / s * 0.94), math.min(580, viewport.Y / s * 0.84))
+	layoutThrowButton()
 end
 
 local function costString(cost: { Coins: number, Research: number }): string
@@ -452,10 +544,16 @@ BUILDERS.Settings = function(profile)
 	})
 end
 
-local function rebuildPanel()
+local function rebuildPanel(force: boolean?)
 	if not panel.Visible or not Store.profile then
 		return
 	end
+	local feastState = if Store.feast then Store.feast.state else ""
+	local key = table.concat({ currentTab, Store.inputMode, Store.persistence, feastState, fingerprint(Store.profile) }, "|")
+	if not force and key == panelKey then
+		return
+	end
+	panelKey = key
 	local selected = GuiService.SelectedObject
 	local selectedName = if selected and selected:IsDescendantOf(panelContent) then selected.Name else nil
 	for _, child in ipairs(panelContent:GetChildren()) do
@@ -482,7 +580,7 @@ function Hud.openPanel(tab: string)
 	panel.Visible = true
 	Store.panelOpen = true
 	ThrowController.cancel()
-	rebuildPanel()
+	rebuildPanel(true)
 	if Store.inputMode == "gamepad" then
 		GuiService.SelectedObject = tabButtons[tab]
 	end
@@ -612,6 +710,11 @@ local function refresh()
 	if not profile then
 		return
 	end
+	local hudFingerprint = table.concat({ Store.inputMode, Store.persistence, fingerprint(profile) }, "|")
+	if hudFingerprint == hudKey then
+		return
+	end
+	hudKey = hudFingerprint
 	local found, total = Economy.discoveryCount(Config, profile)
 	resources.coins.Text = string.format("🪙 Coins  %d", profile.coins)
 	resources.research.Text = string.format("🔬 Research  %d", profile.research)
@@ -732,13 +835,16 @@ function Hud.init()
 	})
 
 	-- Menu buttons (left side).
-	local menu =
-		cluster("Menu", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 8, 0.55, 0), Size = UDim2.fromOffset(92, 420) })
-	Ui.list(Enum.FillDirection.Vertical, 6).Parent = menu
+	local menu = cluster("Menu", {
+		Position = UDim2.fromOffset(8, 8 + RESOURCES_HEIGHT + 8),
+		Size = UDim2.fromOffset(92, MENU_BUTTON_HEIGHT * #TABS + MENU_GAP * (#TABS - 1)),
+	})
+	menuCluster = menu
+	Ui.list(Enum.FillDirection.Vertical, MENU_GAP).Parent = menu
 	for i, tab in ipairs(TABS) do
 		local button = Ui.button({
 			Name = "Menu_" .. tab,
-			Size = UDim2.fromOffset(92, 74),
+			Size = UDim2.fromOffset(92, MENU_BUTTON_HEIGHT),
 			TextSize = 16,
 			LayoutOrder = i,
 			BackgroundColor3 = C.PanelDark,
@@ -805,8 +911,9 @@ function Hud.init()
 		Parent = bottom,
 	}, { Ui.corner(12), Ui.padding(8), Ui.stroke(C.Primary, 3) })
 
-	-- Touch throw button (bottom-right).
-	local throwCluster =
+	-- Touch throw button: bottom-right, stacked above Roblox's touch jump button (see
+	-- layoutThrowButton) so the two never overlap.
+	throwCluster =
 		cluster("Throw", { AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -16, 1, -16), Size = UDim2.fromOffset(150, 150) })
 	throwButton = Ui.button({
 		Name = "ThrowButton",
@@ -818,15 +925,21 @@ function Hud.init()
 	});
 	(throwButton:FindFirstChildOfClass("UICorner") :: UICorner).CornerRadius = UDim.new(0.5, 0)
 	throwButton.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.Touch then
+		if input.UserInputType == Enum.UserInputType.Touch and throwTouch == nil then
+			throwTouch = input
 			ThrowController.begin("touch")
 		end
 	end)
-	throwButton.InputEnded:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.Touch then
+	-- A finger that slides off the button before lifting does not reliably fire the button's
+	-- InputEnded, so the hold is ended from the touch itself (same InputObject for its lifetime).
+	local function endThrowTouch(input: InputObject)
+		if input == throwTouch then
+			throwTouch = nil
 			ThrowController.release("touch")
 		end
-	end)
+	end
+	throwButton.InputEnded:Connect(endThrowTouch)
+	UserInputService.TouchEnded:Connect(endThrowTouch)
 
 	crosshair = Ui.new("TextLabel", {
 		AnchorPoint = Vector2.new(0.5, 0.5),
@@ -845,9 +958,10 @@ function Hud.init()
 	-- Banners & toasts (top-centre).
 	local centre =
 		cluster("Centre", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 8), Size = UDim2.fromOffset(460, 300) })
+	centreCluster = centre
 	Ui.list(Enum.FillDirection.Vertical, 6, Enum.HorizontalAlignment.Center).Parent = centre
 	persistenceBanner = Ui.new("TextLabel", {
-		Size = UDim2.fromOffset(460, 0),
+		Size = UDim2.fromScale(1, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
 		BackgroundColor3 = C.Warn,
 		TextColor3 = C.White,
@@ -859,7 +973,7 @@ function Hud.init()
 		Parent = centre,
 	}, { Ui.corner(10), Ui.padding(6) })
 	feastBanner = Ui.new("TextLabel", {
-		Size = UDim2.fromOffset(460, 0),
+		Size = UDim2.fromScale(1, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
 		BackgroundColor3 = C.Info,
 		TextColor3 = C.White,
@@ -871,7 +985,7 @@ function Hud.init()
 		Parent = centre,
 	}, { Ui.corner(10), Ui.padding(8) })
 	toastHolder = Ui.new("Frame", {
-		Size = UDim2.fromOffset(420, 0),
+		Size = UDim2.new(1, -40, 0, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
 		BackgroundTransparency = 1,
 		LayoutOrder = 3,
@@ -926,7 +1040,7 @@ function Hud.init()
 			Ui.button({ Name = "Tab_" .. tab, Size = UDim2.fromOffset(136, 52), Text = tab, TextSize = 18, LayoutOrder = i, Parent = tabs })
 		button.Activated:Connect(function()
 			currentTab = tab
-			rebuildPanel()
+			rebuildPanel(true)
 		end)
 		tabButtons[tab] = button
 	end
@@ -998,11 +1112,29 @@ function Hud.init()
 
 	local function applyInputMode()
 		throwCluster.Visible = Store.inputMode == "touch" or UserInputService.TouchEnabled
+		layoutThrowButton()
 		refresh()
 	end
+	player:WaitForChild("PlayerGui").ChildAdded:Connect(function(child)
+		if child.Name == "TouchGui" then
+			task.delay(0.5, layoutThrowButton)
+		end
+	end)
+	-- The Prep Kitchen's "Open Pantry" prompt (E / ButtonX / tap) opens the Pantry tab.
+	ProximityPromptService.PromptTriggered:Connect(function(prompt)
+		if prompt.Name == "PantryPrompt" then
+			Hud.openPanel("Pantry")
+		end
+	end)
 	Store.on("inputMode", applyInputMode)
 	Store.on("profile", refresh)
-	Store.on("feast", refreshFeast)
+	Store.on("feast", function()
+		refreshFeast()
+		-- The Map tab shows a "Ring the bell" button only while the feast is ready.
+		if currentTab == "Map" then
+			rebuildPanel()
+		end
+	end)
 	Store.on("toast", Hud.toast)
 	Store.on("reward", function(payload)
 		local species = Config.Species[payload.species]
@@ -1021,6 +1153,10 @@ function Hud.init()
 	applyInputMode()
 
 	RunService.RenderStepped:Connect(function()
+		local touch = throwTouch
+		if touch and (touch.UserInputState == Enum.UserInputState.End or touch.UserInputState == Enum.UserInputState.Cancel) then
+			endThrowTouch(touch)
+		end
 		local charging = ThrowController.charging
 		local cooldown = ThrowController.cooldownRemaining()
 		powerFrame.Visible = charging or cooldown > 0

@@ -46,6 +46,11 @@ function StateService.notifyAll(text: string, kind: string?)
 end
 
 function StateService.init()
+	-- These remotes only go server -> client. A RemoteEvent with no server listener queues every
+	-- client FireServer call, so connect no-op sinks that simply drop them.
+	for _, name in ipairs({ "State", "Notify", "FeedFx", "Feast" }) do
+		(Remotes:WaitForChild(name) :: RemoteEvent).OnServerEvent:Connect(function() end)
+	end
 	DataService.onLoaded(function(player, session)
 		push(player)
 		if session.mode == "Unsaved" then

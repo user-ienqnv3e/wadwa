@@ -561,9 +561,13 @@ function WorldBuilder.build(parentContainer: Instance, config: any, Rng: any): F
 		local b = to - dir * (habitat.Radius - 4) + Vector3.new(0, habitat.GroundY, 0)
 		local frame, length = bridge(paths, habitat.Name .. " Bridge", a, b, 12, Color3.fromRGB(196, 150, 100))
 		local gateFrame = frame * CFrame.new(0, 5, length / 2 - 8)
+		-- Gates only block characters (opened locally per player), never thrown food or the
+		-- trajectory preview, so they are excluded from raycasts.
 		local gate = part(gates, "Gate", Vector3.new(11.6, 10, 1), gateFrame, Color3.fromRGB(255, 210, 120), {
 			Material = Enum.Material.ForceField,
 			Transparency = 0.2,
+			CanQuery = false,
+			CanTouch = false,
 		})
 		gate:SetAttribute("HabitatId", habitatId)
 		local cost = habitat.UnlockCost

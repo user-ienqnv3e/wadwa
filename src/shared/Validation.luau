@@ -66,6 +66,17 @@ function Validation.parseThrow(
 	return { foodId = foodId, direction = unit, power = power }, nil
 end
 
+-- Picks the launch origin for a throw. The client may report where it sees its own head (the
+-- server's copy of a moving character lags behind by the network delay); that is accepted only
+-- when it is finite and within `maxDrift` studs of the server's head, otherwise the server's head
+-- is used. This keeps what the thrower previewed and what the server simulates in agreement.
+function Validation.pickOrigin(reported: any, serverHead: Vector3, maxDrift: number): Vector3
+	if Validation.isFiniteVector3(reported) and (reported - serverHead).Magnitude <= maxDrift then
+		return reported
+	end
+	return serverHead
+end
+
 -- Validates the generic Action remote payload shape. Returns (kind, payload) or (nil, reason).
 function Validation.parseAction(allowedKinds: { [string]: boolean }, maxStringLength: number, payload: any): (string?, any)
 	if type(payload) ~= "table" then

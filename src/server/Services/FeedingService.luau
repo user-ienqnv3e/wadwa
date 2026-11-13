@@ -85,15 +85,20 @@ local function headPosition(character: Model): Vector3?
 	return nil
 end
 
+-- The island whose animals can eat food lying at `position`, if any. Only food within an
+-- animal's reach (plus its eating distance) counts, so ground food is never stranded at the
+-- edge where nothing can get to it.
 local function habitatAt(position: Vector3): string?
 	for id, habitat in pairs(Config.Habitats) do
 		local dx, dz = position.X - habitat.Center[1], position.Z - habitat.Center[2]
-		if dx * dx + dz * dz <= habitat.Radius * habitat.Radius and math.abs(position.Y - habitat.GroundY) < 4 then
+		local limit = AnimalService.reachRadius(habitat) + Config.Animal.EatDistance - 0.1
+		if dx * dx + dz * dz <= limit * limit and math.abs(position.Y - habitat.GroundY) < 4 then
 			return id
 		end
 	end
 	return nil
 end
+FeedingService.habitatAt = habitatAt
 
 local function removeGroundFood(food: AnimalService.GroundFood)
 	if food.removed then
@@ -236,7 +241,7 @@ local function endProjectile(index: number, kind: string, position: Vector3)
 	FeedFxRemote:FireAllClients({ t = "end", id = projectile.id, kind = kind, pos = position })
 end
 
-local function onThrow(player: Player, foodId: any, direction: any, power: any)
+local function onThrow(player: Player, foodId: any, direction: any, power: any, reportedOrigin: any)
 	local profile = deps.getProfile(player)
 	if not profile then
 		return reject("no_profile")
@@ -275,7 +280,8 @@ local function onThrow(player: Player, foodId: any, direction: any, power: any)
 	lastThrow[player] = now
 	deps.markDirty(player)
 
-	local origin = head + request.direction * Config.Throw.SpawnForwardOffset
+	local launchHead = Validation.pickOrigin(reportedOrigin, head, Config.Throw.MaxOriginDrift)
+	local origin = launchHead + request.direction * Config.Throw.SpawnForwardOffset
 	local velocity =
 		Trajectory.launchVelocity(request.direction, request.power, Config.Throw.MinSpeed, Economy.maxThrowSpeed(Config, profile))
 	nextId += 1
@@ -386,8 +392,8 @@ function FeedingService.init(dependencies: Deps, world: Instance)
 	groundFolder.Parent = workspace
 
 	AnimalService.bindFeeding(FeedingService.getGroundFoods, onReachFood)
-	ThrowRemote.OnServerEvent:Connect(function(player, foodId, direction, power)
-		if not Guard.run("Throw handler", onThrow, player, foodId, direction, power) then
+	ThrowRemote.OnServerEvent:Connect(function(player, foodId, direction, power, reportedOrigin)
+		if not Guard.run("Throw handler", onThrow, player, foodId, direction, power, reportedOrigin) then
 			reject("error")
 		end
 	end)

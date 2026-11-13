@@ -22,6 +22,7 @@ Config.Data = {
 	SessionLockTimeout = 300, -- seconds after which another server's lock is considered stale
 	LockedRetryDelay = 6, -- seconds to wait when another server still owns the lock
 	ShutdownBudget = 25, -- seconds BindToClose may spend saving
+	ReleaseWait = 30, -- seconds a quick rejoin waits for the previous session's final save on this server
 }
 
 --------------------------------------------------------------------------------
@@ -61,6 +62,7 @@ Config.Throw = {
 	ProjectileRadius = 0.7,
 	GroundFoodLifetime = 12,
 	MaxRange = 260, -- server rejects hits further than this from the throw origin
+	MaxOriginDrift = 6, -- studs a client-reported head position may differ from the server's
 	BaseCooldown = 0.8,
 	MinCooldown = 0.3,
 	PreviewBaseSeconds = 0.7, -- trajectory preview length before Steady Aim upgrades
@@ -436,7 +438,9 @@ Config.Animal = {
 	StuckProgressEpsilon = 0.4,
 	WanderMin = 2.5,
 	WanderMax = 6,
-	EdgeMargin = 10, -- keep animals this far from the island edge
+	EdgeMargin = 10, -- wander targets stay this far from the island edge
+	GrassApothem = 0.924, -- the grass top is a 16-sided prism whose flat sides are this x Radius away
+	ReachInset = 1.5, -- animals chasing food may walk to within this of the grass edge
 	EatDistance = 2.6,
 	FirstSpawnOffset = { 0, -16 }, -- a tutorial Puffhop waits this far from the spawn (x, z)
 }
