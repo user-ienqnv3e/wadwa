@@ -1462,12 +1462,106 @@ test("a rejoining player's saved garden is rebuilt; lanes are bounded and freed"
 		seen[lane] = true
 	end
 	-- The first player leaves (save) and rejoins: the garden comes back from the saved profile.
+	-- Two players leave: the waiting 7th player takes the first freed lane (see the QA pass 4
+	-- regression), and the first player rejoins into the second.
 	engine:removePlayer(players[1])
+	engine:removePlayer(players[2])
 	engine:advance(2)
+	truthy(engine:service("DecorService").laneOf(players[#players]), "waiting player drawn")
 	local back = join(engine, 971)
 	engine:advance(1)
 	eq(#gardenModels(engine, back), 1, "saved garden rebuilt on rejoin")
 	truthy(engine:service("DecorService").modelCount() <= Config.Decor.Lanes, "bounded")
+	noFailures(engine)
+end)
+
+--------------------------------------------------------------------------------
+print("QA pass 4 regressions")
+test("RequestState spam cannot make the server stream full snapshots", function()
+	local engine = boot()
+	local player = join(engine, 981)
+	engine:advance(3)
+	local function fulls()
+		local n = 0
+		for _, m in ipairs(engine:messages(player, "State")) do
+			if m.full then
+				n += 1
+			end
+		end
+		return n
+	end
+	local before = fulls()
+	for _ = 1, 30 do
+		engine:fireServer(player, "Action", { kind = "RequestState" })
+		engine:advance(0.1)
+	end
+	engine:advance(3)
+	local sent = fulls() - before
+	truthy(sent >= 1, "a resync is still answered")
+	truthy(sent <= 3, "30 requests in 3 s produced " .. sent .. " full snapshots")
+	noFailures(engine)
+end)
+
+test("a player waiting for a decoration lane is drawn as soon as one frees up", function()
+	local engine = boot()
+	local Config = engine.config
+	local DecorService = engine:service("DecorService")
+	local players = {}
+	for i = 1, Config.Decor.Lanes + 1 do
+		local p = join(engine, 985 + i)
+		local profile = profileOf(engine, p)
+		profile.decorOwned.daisy_lantern = 1
+		profile.decorPlaced.meadow = { p1 = "daisy_lantern" }
+		DecorService.sync(p)
+		players[i] = p
+	end
+	local waiting = players[#players]
+	eq(DecorService.laneOf(waiting), nil, "waiting")
+	engine:removePlayer(players[2])
+	engine:advance(2)
+	truthy(DecorService.laneOf(waiting), "the waiting player got the freed lane")
+	local folder = engine.workspace.WildFeastDecor:FindFirstChild("Garden_" .. waiting.UserId)
+	eq(folder and #folder:GetChildren() or 0, 1, "and their garden is drawn")
+	eq(DecorService.modelCount(), Config.Decor.Lanes, "still bounded")
+	noFailures(engine)
+end)
+
+test("an out-of-stock food can't be selected (throws would silently do nothing)", function()
+	local engine = boot()
+	local player = join(engine, 995)
+	local profile = profileOf(engine, player)
+	profile.unlockedFoods.clover_bun = true
+	profile.inventory.clover_bun = nil
+	engine:fireServer(player, "Action", { kind = "SelectFood", id = "clover_bun" })
+	engine:advance(0.3)
+	eq(profile.selectedFood, "sunberry", "selection unchanged")
+	truthy(string.find(notifications(engine, player), "Clover Bun", 1, true), "player told why")
+	profile.inventory.clover_bun = 2
+	engine:fireServer(player, "Action", { kind = "SelectFood", id = "clover_bun" })
+	engine:advance(0.3)
+	eq(profile.selectedFood, "clover_bun", "stocked food selects")
+	noFailures(engine)
+end)
+
+test("while a resync waits out its throttle, ordinary changes still arrive promptly as deltas", function()
+	local engine = boot()
+	local player = join(engine, 996)
+	local profile = profileOf(engine, player)
+	engine:advance(0.5)
+	engine:fireServer(player, "Action", { kind = "RequestState" }) -- right after the join snapshot
+	engine:advance(0.1)
+	profile.coins = 4321
+	engine:service("StateService").markDirty(player)
+	engine:advance(0.4)
+	eq(engine:lastState(player).profile.coins, 4321, "change delivered within the throttle window")
+	engine:advance(3)
+	local list = engine:messages(player, "State")
+	local fulls = 0
+	for _, m in ipairs(list) do
+		fulls += if m.full then 1 else 0
+	end
+	eq(fulls, 2, "join snapshot + the (throttled) resync snapshot")
+	eq(engine:lastState(player).gaps, 0, "contiguous")
 	noFailures(engine)
 end)
 

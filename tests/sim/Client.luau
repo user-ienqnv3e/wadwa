@@ -264,6 +264,12 @@ end
 
 -- Server -> this client, after the simulated latency.
 function Client:deliver(remoteName, args)
+	-- Tests can lose server -> client messages too (client.dropIncoming[remote] = n).
+	local drop = self.dropIncoming and self.dropIncoming[remoteName]
+	if drop and drop > 0 then
+		self.dropIncoming[remoteName] = drop - 1
+		return
+	end
 	local remote = self.engine.remotes:FindFirstChild(remoteName)
 	local co = coroutine.create(function()
 		instanceSignal(remote, "OnClientEvent"):Fire(table.unpack(args))
@@ -278,6 +284,12 @@ function Client:send(remoteName, args)
 		copied[i] = Engine.remoteCopy(args[i])
 	end
 	table.insert(self.sent, { remote = remoteName, args = copied, at = self.engine.now })
+	-- Tests can make messages vanish in transit (client.dropOutgoing[remote] = n) to check recovery.
+	local drop = self.dropOutgoing and self.dropOutgoing[remoteName]
+	if drop and drop > 0 then
+		self.dropOutgoing[remoteName] = drop - 1
+		return
+	end
 	local engine, player = self.engine, self.player
 	local co = coroutine.create(function()
 		engine:fireServer(player, remoteName, table.unpack(copied, 1, args.n))

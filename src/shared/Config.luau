@@ -596,7 +596,8 @@ Config.Remote = {
 	ActionBurst = 12,
 	ThrowBurst = 3, -- extra buffer on top of the upgrade-driven cooldown
 	MaxStringLength = 32,
-	StatePushInterval = 0.25, -- minimum seconds between full state pushes to one client
+	StatePushInterval = 0.25, -- minimum seconds between state pushes to one client
+	FullSnapshotInterval = 2, -- a client's resync requests are answered at most this often
 }
 
 --------------------------------------------------------------------------------

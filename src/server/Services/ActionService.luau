@@ -85,7 +85,12 @@ function ActionService.init(deps: Deps)
 		if kind == "SelectFood" then
 			local foodId = stringField(payload, "id")
 			if foodId and Config.Foods[foodId] and profile.unlockedFoods[foodId] then
-				profile.selectedFood = foodId
+				if Economy.hasFood(Config, profile, foodId) then
+					profile.selectedFood = foodId
+				else
+					-- Selecting an empty food would make every throw silently fail.
+					deps.notify(player, "You're out of " .. Config.Foods[foodId].Name .. ". Prepare or cook more first.", "warn")
+				end
 				deps.markDirty(player)
 			end
 			return

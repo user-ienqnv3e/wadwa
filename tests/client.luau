@@ -700,6 +700,44 @@ test("the client mirror follows deltas exactly and resyncs after a missed messag
 	noFailures(engine)
 end)
 
+print("QA pass 4 regressions")
+test("a dropped resync request is retried, so the mirror can't stay frozen after a gap", function()
+	local engine, player, client = session()
+	local ProfileSync = engine:shared("ProfileSync")
+	local Store = client:controller("Store")
+	local profile = serverProfile(engine, player)
+	engine:advance(4)
+	-- One real delta is lost on the way down, and the client's resync request is lost on the way up.
+	client.dropIncoming = { State = 1 }
+	client.dropOutgoing = { Action = 1 }
+	profile.coins += 5
+	pushState(engine, player)
+	engine:advance(0.5)
+	for i = 1, 8 do
+		profile.coins += 10
+		profile.inventory.clover_bun = i
+		profile.unlockedFoods.clover_bun = true
+		pushState(engine, player)
+		engine:advance(0.5)
+	end
+	truthy(ProfileSync.deepEqual(Store.profile, engine.remoteCopy(profile)), "mirror recovered after a lost resync request")
+	noFailures(engine)
+end)
+
+test("stale or duplicate snapshots never roll the mirror back", function()
+	local engine, player, client = session()
+	local Store = client:controller("Store")
+	local profile = serverProfile(engine, player)
+	profile.coins = 777
+	pushState(engine, player)
+	engine:advance(0.5)
+	eq(Store.profile.coins, 777)
+	client:deliver("State", { { seq = 1, full = true, profile = { coins = 3 }, persistence = "DataStore" } })
+	engine:advance(0.3)
+	eq(Store.profile.coins, 777, "old snapshot (seq 1) ignored")
+	noFailures(engine)
+end)
+
 print(string.format("\n%d passed, %d failed", passed, failed))
 if failed > 0 then
 	process.exit(1)

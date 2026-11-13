@@ -25,6 +25,7 @@ local sent: { [Player]: any } = {}
 local sequence: { [Player]: number } = {}
 local fullPending: { [Player]: boolean } = {}
 local sentMode: { [Player]: string } = {}
+local lastFull: { [Player]: number } = {}
 
 -- Bytes are not measured here (the engine does not expose them); tests measure payload sizes.
 StateService.counters = { full = 0, delta = 0, skipped = 0 }
@@ -35,9 +36,21 @@ local function push(player: Player)
 	if not session then
 		return
 	end
-	lastPush[player] = os.clock()
+	local now = os.clock()
+	-- Resyncs are throttled so a client can't make us stream snapshots. While one waits, ordinary
+	-- deltas keep flowing (a client that is in sync applies them) and the snapshot follows soon.
+	local throttled = fullPending[player] == true
+		and sent[player] ~= nil
+		and now - (lastFull[player] or -math.huge) < Config.Remote.FullSnapshotInterval
+	lastPush[player] = now
 	local profile = session.profile
-	local full = fullPending[player] or sent[player] == nil
+	local full = (fullPending[player] == true and not throttled) or sent[player] == nil
+	if throttled then
+		dirty[player] = true -- come back for the snapshot
+	end
+	if full then
+		lastFull[player] = now
+	end
 	local modeKey = session.mode .. "|" .. tostring(session.modeReason)
 	local delta = nil
 	if not full then
@@ -47,7 +60,9 @@ local function push(player: Player)
 			return -- nothing the client doesn't already have
 		end
 	end
-	fullPending[player] = nil
+	if full then
+		fullPending[player] = nil
+	end
 	sequence[player] = (sequence[player] or 0) + 1
 	sent[player] = ProfileSync.deepCopy(profile)
 	sentMode[player] = modeKey
@@ -148,6 +163,7 @@ function StateService.init()
 		sequence[player] = nil
 		fullPending[player] = nil
 		sentMode[player] = nil
+		lastFull[player] = nil
 	end)
 	RunService.Heartbeat:Connect(function()
 		local now = os.clock()

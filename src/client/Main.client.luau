@@ -27,24 +27,27 @@ task.spawn(WorldVisuals.init)
 -- last message we applied (a missed message, a reconnect) is ignored and a fresh snapshot is
 -- requested, so the mirror can never silently drift from the server.
 local lastSeq = 0
-local resyncAsked = false
+local resyncAskedAt: number? = nil
+local RESYNC_RETRY = 3 -- seconds; a lost request (or one the server throttled) is asked again
 StateRemote.OnClientEvent:Connect(function(payload)
 	if type(payload) ~= "table" or type(payload.seq) ~= "number" then
 		return
 	end
-	if payload.full == true and type(payload.profile) == "table" then
+	if payload.full == true and type(payload.profile) == "table" and payload.seq > lastSeq then
 		Store.profile = payload.profile
 	elseif Store.profile ~= nil and payload.seq == lastSeq + 1 and type(payload.delta) == "table" then
 		ProfileSync.apply(Store.profile, payload.delta)
 	else
-		if not resyncAsked then
-			resyncAsked = true
+		-- Stale snapshots (seq <= last) are just dropped; anything else out of order means we missed
+		-- something, so ask for a snapshot (again, if the last request seems lost).
+		if payload.seq > lastSeq + 1 and (resyncAskedAt == nil or os.clock() - resyncAskedAt > RESYNC_RETRY) then
+			resyncAskedAt = os.clock()
 			ActionRemote:FireServer({ kind = "RequestState" })
 		end
 		return
 	end
 	lastSeq = payload.seq
-	resyncAsked = false
+	resyncAskedAt = nil
 	Store.persistence = payload.persistence
 	Store.emit("profile", Store.profile)
 end)

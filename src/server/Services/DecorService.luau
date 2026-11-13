@@ -67,6 +67,14 @@ local function release(player: Player)
 	if lane then
 		lanes[lane] = nil
 		laneOf[player] = nil
+		-- Hand the freed lane to someone who was waiting for one (deferred: we may be inside the
+		-- PlayerRemoving handler).
+		for waiting, entries in pairs(shown) do
+			if laneOf[waiting] == nil and next(entries) == nil and waiting ~= player then
+				task.defer(DecorService.sync, waiting)
+				break
+			end
+		end
 	end
 end
 
