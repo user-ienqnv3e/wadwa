@@ -1,0 +1,235 @@
+--!strict
+-- Versioned profile schema: defaults, migrations, sanitisation and session-lock evaluation.
+-- Sanitising on every load guarantees saved data stays bounded and only contains keys that the
+-- current Config knows about, even if a save was corrupted or produced by an older version.
+
+local SaveSchema = {}
+
+export type Stats = {
+	totalFeeds: number,
+	perfectCatches: number,
+	feastsJoined: number,
+	feastsCompleted: number,
+	coinsEarned: number,
+}
+
+export type Profile = {
+	schemaVersion: number,
+	coins: number,
+	research: number,
+	inventory: { [string]: number },
+	unlockedFoods: { [string]: boolean },
+	unlockedHabitats: { [string]: boolean },
+	upgrades: { [string]: number },
+	restoration: { [string]: number },
+	trust: { [string]: number },
+	fedCount: { [string]: number },
+	discoveries: { [string]: { [string]: boolean } },
+	seenSpecies: { [string]: boolean },
+	stats: Stats,
+	settings: { [string]: any },
+	tutorialStep: number,
+	selectedFood: string,
+}
+
+local function finiteNonNegative(value: any, cap: number): number
+	if type(value) ~= "number" or value ~= value or value == math.huge or value == -math.huge then
+		return 0
+	end
+	return math.clamp(math.floor(value + 1e-9), 0, cap)
+end
+
+function SaveSchema.default(config: any): Profile
+	local settings = {}
+	for key, def in pairs(config.Settings) do
+		settings[key] = def.Default
+	end
+	local unlockedFoods = {}
+	for id, food in pairs(config.Foods) do
+		if food.Free then
+			unlockedFoods[id] = true
+		end
+	end
+	return {
+		schemaVersion = config.Data.SchemaVersion,
+		coins = 0,
+		research = 0,
+		inventory = {},
+		unlockedFoods = unlockedFoods,
+		unlockedHabitats = { meadow = true },
+		upgrades = {},
+		restoration = {},
+		trust = {},
+		fedCount = {},
+		discoveries = {},
+		seenSpecies = {},
+		stats = { totalFeeds = 0, perfectCatches = 0, feastsJoined = 0, feastsCompleted = 0, coinsEarned = 0 },
+		settings = settings,
+		tutorialStep = 0,
+		selectedFood = "sunberry",
+	}
+end
+
+-- Ordered migrations: MIGRATIONS[n] upgrades a version-n table to version n+1.
+local MIGRATIONS: { [number]: (any) -> any } = {
+	-- v1 stored discoveries as a flat list of "species:food" strings and had no restoration table.
+	[1] = function(data: any): any
+		local discoveries = {}
+		if type(data.discoveries) == "table" then
+			for _, entry in ipairs(data.discoveries) do
+				if type(entry) == "string" then
+					local species, food = string.match(entry, "^([%w_]+):([%w_]+)$")
+					if species and food then
+						discoveries[species] = discoveries[species] or {}
+						discoveries[species][food] = true
+					end
+				end
+			end
+		end
+		data.discoveries = discoveries
+		data.restoration = data.restoration or {}
+		data.schemaVersion = 2
+		return data
+	end,
+}
+
+-- Brings any stored table up to the current schema version. Returns (data, nil) or (nil, reason).
+-- Data from a *newer* schema is refused so an old server never overwrites it.
+function SaveSchema.migrate(config: any, data: any): (any, string?)
+	if type(data) ~= "table" then
+		return nil, "not_a_table"
+	end
+	local version = data.schemaVersion
+	if type(version) ~= "number" or version ~= version then
+		version = 1
+	end
+	version = math.floor(version)
+	if version > config.Data.SchemaVersion then
+		return nil, "newer_schema"
+	end
+	while version < config.Data.SchemaVersion do
+		local step = MIGRATIONS[version]
+		if not step then
+			return nil, "missing_migration"
+		end
+		data = step(data)
+		version = data.schemaVersion
+	end
+	return data, nil
+end
+
+-- Produces a clean profile containing only known keys and bounded values.
+function SaveSchema.sanitize(config: any, data: any): Profile
+	local profile = SaveSchema.default(config)
+	if type(data) ~= "table" then
+		return profile
+	end
+	local caps = config.Caps
+	profile.coins = finiteNonNegative(data.coins, caps.Coins)
+	profile.research = finiteNonNegative(data.research, caps.Research)
+
+	local function readMap(source: any, keys: { [string]: any }, reader: (any, string) -> any)
+		local result = {}
+		if type(source) == "table" then
+			for key in pairs(keys) do
+				local value = reader(source[key], key)
+				if value ~= nil then
+					result[key] = value
+				end
+			end
+		end
+		return result
+	end
+
+	profile.inventory = readMap(data.inventory, config.Foods, function(value, key)
+		if config.Foods[key].Free then
+			return nil
+		end
+		local count = finiteNonNegative(value, caps.FoodStack)
+		return if count > 0 then count else nil
+	end)
+	local unlockedFoods = readMap(data.unlockedFoods, config.Foods, function(value)
+		return if value == true then true else nil
+	end)
+	for id, food in pairs(config.Foods) do
+		if food.Free then
+			unlockedFoods[id] = true
+		end
+	end
+	profile.unlockedFoods = unlockedFoods
+	local habitats = readMap(data.unlockedHabitats, config.Habitats, function(value)
+		return if value == true then true else nil
+	end)
+	habitats.meadow = true
+	profile.unlockedHabitats = habitats
+	profile.upgrades = readMap(data.upgrades, config.Upgrades, function(value, key)
+		local level = finiteNonNegative(value, #config.Upgrades[key].Levels)
+		return if level > 0 then level else nil
+	end)
+	profile.restoration = readMap(data.restoration, config.Habitats, function(value, key)
+		local level = finiteNonNegative(value, #config.Habitats[key].Restoration)
+		return if level > 0 then level else nil
+	end)
+	profile.trust = readMap(data.trust, config.Species, function(value)
+		local points = finiteNonNegative(value, caps.Trust)
+		return if points > 0 then points else nil
+	end)
+	profile.fedCount = readMap(data.fedCount, config.Species, function(value)
+		local count = finiteNonNegative(value, caps.Counter)
+		return if count > 0 then count else nil
+	end)
+	profile.discoveries = readMap(data.discoveries, config.Species, function(value)
+		if type(value) ~= "table" then
+			return nil
+		end
+		local foods = {}
+		local any = false
+		for foodId in pairs(config.Foods) do
+			if value[foodId] == true then
+				foods[foodId] = true
+				any = true
+			end
+		end
+		return if any then foods else nil
+	end)
+	profile.seenSpecies = readMap(data.seenSpecies, config.Species, function(value)
+		return if value == true then true else nil
+	end)
+	if type(data.stats) == "table" then
+		for key in pairs(profile.stats) do
+			(profile.stats :: any)[key] = finiteNonNegative(data.stats[key], caps.Counter)
+		end
+	end
+	if type(data.settings) == "table" then
+		for key, def in pairs(config.Settings) do
+			if type(data.settings[key]) == def.Type then
+				profile.settings[key] = data.settings[key]
+			end
+		end
+	end
+	profile.tutorialStep = finiteNonNegative(data.tutorialStep, config.TutorialSteps)
+	if type(data.selectedFood) == "string" and profile.unlockedFoods[data.selectedFood] then
+		profile.selectedFood = data.selectedFood
+	end
+	return profile
+end
+
+export type Lock = { jobId: string, time: number }
+
+-- Decides whether this server may take ownership of a stored record.
+-- "free": no lock, "ours": already owned by this server, "stale": owner timed out, "held": owned elsewhere.
+function SaveSchema.evaluateLock(record: any, jobId: string, now: number, timeout: number): string
+	if type(record) ~= "table" or type(record.lock) ~= "table" then
+		return "free"
+	end
+	local lock = record.lock
+	if lock.jobId == jobId then
+		return "ours"
+	end
+	if type(lock.time) ~= "number" or lock.time ~= lock.time or now - lock.time > timeout then
+		return "stale"
+	end
+	return "held"
+end
+
+return SaveSchema

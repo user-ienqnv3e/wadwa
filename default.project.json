@@ -1,0 +1,65 @@
+{
+  "name": "WildFeastIslands",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "Shared": {
+        "$path": "src/shared"
+      },
+      "Remotes": {
+        "$className": "Folder",
+        "Throw": { "$className": "RemoteEvent" },
+        "Action": { "$className": "RemoteEvent" },
+        "State": { "$className": "RemoteEvent" },
+        "Notify": { "$className": "RemoteEvent" },
+        "FeedFx": { "$className": "RemoteEvent" },
+        "Feast": { "$className": "RemoteEvent" }
+      }
+    },
+    "ServerScriptService": {
+      "Server": {
+        "$path": "src/server"
+      }
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "Client": {
+          "$path": "src/client"
+        }
+      }
+    },
+    "Workspace": {
+      "$properties": {
+        "StreamingEnabled": false,
+        "Gravity": 196.2
+      }
+    },
+    "Lighting": {
+      "$properties": {
+        "ClockTime": 14.5,
+        "Brightness": 2.6,
+        "Ambient": [0.45, 0.45, 0.5],
+        "OutdoorAmbient": [0.62, 0.6, 0.66],
+        "GlobalShadows": true,
+        "EnvironmentDiffuseScale": 0.6,
+        "EnvironmentSpecularScale": 0.3
+      },
+      "Atmosphere": {
+        "$className": "Atmosphere",
+        "$properties": {
+          "Density": 0.22,
+          "Offset": 0.1,
+          "Color": [0.78, 0.9, 1.0],
+          "Decay": [0.55, 0.72, 0.95],
+          "Glare": 0.2,
+          "Haze": 0.8
+        }
+      }
+    },
+    "SoundService": {
+      "$properties": {
+        "RespectFilteringEnabled": true
+      }
+    }
+  }
+}
