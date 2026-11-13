@@ -21,6 +21,7 @@ type Deps = {
 	ringBell: (Player) -> boolean,
 	summon: (string, Player) -> (boolean, string),
 	resync: (Player) -> (),
+	decorChanged: (Player) -> (),
 }
 
 local ActionService = {}
@@ -215,6 +216,9 @@ function ActionService.init(deps: Deps)
 		end
 		if ok then
 			deps.markDirty(player)
+			if kind == "PlaceDecor" or kind == "RemoveDecor" then
+				deps.decorChanged(player)
+			end
 		end
 	end
 

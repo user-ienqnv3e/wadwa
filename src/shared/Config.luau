@@ -758,6 +758,8 @@ Config.Decor = {
 	ComfortCoinPct = 0.75, -- % extra coins on an island per comfort point placed there
 	MaxComfortCoinPct = 30,
 	PlotRadiusFraction = 0.78, -- plots ring the island at this fraction of its radius
+	Lanes = 6, -- players whose gardens are drawn at once (each gets an interleaved ring of plots)
+	MaxPartsPerModel = 6,
 }
 
 Config.Kitchen = {

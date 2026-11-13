@@ -11,6 +11,8 @@ Store.persistence = "" :: string
 Store.feast = nil :: any
 Store.inputMode = "keyboard" :: string -- "keyboard" | "touch" | "gamepad"
 Store.panelOpen = false
+Store.barFoods = {} :: { string } -- foods currently shown on the HUD bar (keys 1-6, in order)
+Store.allBarFoods = {} :: { string } -- every food the bar pages through (Q / L1 / R1 cycle)
 
 local listeners: { [string]: { (...any) -> () } } = {}
 

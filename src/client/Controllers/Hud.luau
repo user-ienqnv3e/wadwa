@@ -45,6 +45,7 @@ local menuButtons: { [string]: TextButton } = {}
 local panel: Frame
 local panelTitle: TextLabel
 local panelContent: ScrollingFrame
+local searchBox: TextBox
 local tabButtons: { [string]: TextButton } = {}
 local currentTab = "Pantry"
 local worldMarker: BillboardGui
@@ -308,16 +309,37 @@ end
 local rebuildPanelRef: (boolean?) -> ()
 local BUILDERS: { [string]: (any) -> () } = {}
 
--- Paged, filterable lists for the expansion tabs (8 rows per page, one category filter).
+-- Paged lists with a text search (the persistent search box above the panel content) and one
+-- category filter. Search matches names and descriptions, case-insensitively.
 local PAGE_SIZE = 8
 local listPage: { [string]: number } = {}
 local listFilter: { [string]: number } = {}
-local function pagedList(tab: string, ids: { string }, filters: { string }, categoryOf: (string) -> string, render: (Frame, string) -> ())
+local searchQuery: { [string]: string } = {}
+local SEARCH_TABS = { Pantry = true, Kitchen = true, Quests = true, Decor = true, Upgrades = true, Journal = true }
+
+local function matches(def: any, query: string): boolean
+	if query == "" then
+		return true
+	end
+	local name = string.lower(def.Name or "")
+	local description = string.lower(def.Description or "")
+	return string.find(name, query, 1, true) ~= nil or string.find(description, query, 1, true) ~= nil
+end
+
+local function pagedList(
+	tab: string,
+	ids: { string },
+	defs: { [string]: any },
+	filters: { string },
+	categoryOf: (string) -> string,
+	render: (Frame, string) -> ()
+)
 	local filterIndex = listFilter[tab] or 0
 	local filter = filters[filterIndex]
+	local query = string.lower(searchQuery[tab] or "")
 	local shown = {}
 	for _, id in ipairs(ids) do
-		if not filter or categoryOf(id) == filter then
+		if (not filter or categoryOf(id) == filter) and matches(defs[id], query) then
 			table.insert(shown, id)
 		end
 	end
@@ -330,7 +352,7 @@ local function pagedList(tab: string, ids: { string }, filters: { string }, cate
 		listPage[tab] = 1
 		rebuildPanelRef(true)
 	end)
-	actionButton(bar, "PrevPage_" .. tab, string.format("◀ Page %d/%d", page, pages), page > 1, 2, function()
+	actionButton(bar, "PrevPage_" .. tab, string.format("◀ Page %d/%d · %d shown", page, pages, #shown), page > 1, 2, function()
 		listPage[tab] = page - 1
 		rebuildPanelRef(true)
 	end)
@@ -338,6 +360,23 @@ local function pagedList(tab: string, ids: { string }, filters: { string }, cate
 		listPage[tab] = page + 1
 		rebuildPanelRef(true)
 	end)
+	if #shown == 0 then
+		local r = row(2)
+		Ui.label({
+			Name = "NoResults",
+			Text = if query ~= ""
+				then string.format(
+					"No matches for “%s”%s. Clear the search or change the filter.",
+					searchQuery[tab],
+					if filter then " in " .. filter else ""
+				)
+				else "Nothing here yet for this filter.",
+			TextSize = 16,
+			LayoutOrder = 1,
+			Parent = r,
+		})
+		return
+	end
 	for i = (page - 1) * PAGE_SIZE + 1, math.min(#shown, page * PAGE_SIZE) do
 		render(row(i + 1), shown[i])
 	end
@@ -350,7 +389,7 @@ end
 
 BUILDERS.Kitchen = function(profile)
 	header(0, "Kitchen — cook meals, lures and crafts from your basket")
-	pagedList("Kitchen", Config.RecipeOrder, Config.StationOrder, function(id)
+	pagedList("Kitchen", Config.RecipeOrder, Config.Recipes, Config.StationOrder, function(id)
 		return Config.Recipes[id].Station
 	end, function(r, id)
 		local recipe = Config.Recipes[id]
@@ -399,7 +438,7 @@ end
 
 BUILDERS.Quests = function(profile)
 	header(0, string.format("Quests — %d ready to claim", Economy.claimableQuestCount(Config, profile)))
-	pagedList("Quests", Config.QuestOrder, Config.QuestGroupOrder, function(id)
+	pagedList("Quests", Config.QuestOrder, Config.Quests, Config.QuestGroupOrder, function(id)
 		return Config.Quests[id].Group
 	end, function(r, id)
 		local quest = Config.Quests[id]
@@ -422,7 +461,7 @@ end
 
 BUILDERS.Decor = function(profile)
 	header(0, string.format("Decor — %d plots per island; placed pieces add comfort", Economy.plots(Config, profile)))
-	pagedList("Decor", Config.DecorationOrder, Config.HabitatOrder, function(id)
+	pagedList("Decor", Config.DecorationOrder, Config.Decorations, Config.HabitatOrder, function(id)
 		return Config.Decorations[id].Habitat
 	end, function(r, id)
 		local deco = Config.Decorations[id]
@@ -477,14 +516,19 @@ BUILDERS.Decor = function(profile)
 	end)
 end
 
+local FOOD_KINDS = { "core", "harvest", "cooked" }
+
 BUILDERS.Pantry = function(profile)
-	header(0, "Pantry — prepare food for your throws")
-	for i, foodId in ipairs(Config.FoodOrder) do
+	header(0, string.format("Pantry — prepare food · %d/%d pinned to your bar", #(profile.pinned or {}), Config.FoodBar.MaxPinned))
+	pagedList("Pantry", Config.AllFoodOrder, Config.Foods, FOOD_KINDS, function(id)
+		return Config.Foods[id].Kind
+	end, function(r, foodId)
 		local food = Config.Foods[foodId]
-		local r = row(i)
+		local stock = profile.inventory[foodId] or 0
 		local count = if food.Free
 			then "∞ free"
-			elseif profile.unlockedFoods[foodId] then tostring(profile.inventory[foodId] or 0) .. " in basket"
+			elseif profile.unlockedFoods[foodId] then tostring(stock) .. " in basket"
+			elseif food.Kind == "cooked" then "cook in the Kitchen"
 			else "not learned"
 		Ui.label({
 			Text = string.format("%s  %s — %s", food.Icon, food.Name, count),
@@ -494,7 +538,7 @@ BUILDERS.Pantry = function(profile)
 			Parent = r,
 		})
 		Ui.label({
-			Text = food.Description .. string.format("  (value ×%.1f)", food.Value),
+			Text = food.Description .. string.format("  (%s, value ×%.1f)", Config.FoodTags[food.Tag].Name, food.Value),
 			TextSize = 16,
 			TextColor3 = C.Muted,
 			LayoutOrder = 2,
@@ -502,13 +546,21 @@ BUILDERS.Pantry = function(profile)
 		})
 		if food.Free then
 			Ui.label({ Text = "✓ Always free and never runs out.", TextSize = 16, LayoutOrder = 3, Parent = r })
+		elseif food.Kind == "cooked" then
+			Ui.label({
+				Text = "🍳 Made by the " .. Config.Recipes["cook_" .. foodId].Station .. " recipe in the Kitchen tab.",
+				TextSize = 16,
+				LayoutOrder = 3,
+				Parent = r,
+			})
 		elseif profile.unlockedFoods[foodId] then
-			local batch = Economy.batchSize(Config, profile)
-			local affordable = profile.coins >= food.BatchCost
+			local batch = Economy.foodBatchSize(Config, profile, foodId)
+			local cost = Economy.foodBatchCost(Config, profile, foodId)
+			local affordable = profile.coins >= cost
 			actionButton(
 				r,
 				"Buy_" .. foodId,
-				string.format("Prepare batch (+%d) — %d coins%s", batch, food.BatchCost, if affordable then "" else " (need more)"),
+				string.format("Prepare batch (+%d) — %d coins%s", batch, cost, if affordable then "" else " (need more)"),
 				affordable,
 				3,
 				function()
@@ -535,60 +587,77 @@ BUILDERS.Pantry = function(profile)
 				end
 			)
 		end
-	end
+		if profile.unlockedFoods[foodId] and Economy.hasFood(Config, profile, foodId) and profile.selectedFood ~= foodId then
+			actionButton(r, "Select_" .. foodId, "Select for throwing", true, 4, function()
+				Store.emit("selectFood", foodId)
+			end)
+		end
+		if not food.Free and profile.unlockedFoods[foodId] then
+			local pinned = table.find(profile.pinned or {}, foodId) ~= nil
+			local full = #(profile.pinned or {}) >= Config.FoodBar.MaxPinned
+			actionButton(
+				r,
+				"Pin_" .. foodId,
+				if pinned then "📌 Pinned — tap to unpin" elseif full then "Pin to food bar (bar full)" else "Pin to food bar",
+				pinned or not full,
+				5,
+				function()
+					pending["Pin_" .. foodId] = os.clock()
+					send("PinFood", { id = foodId })
+				end
+			)
+		end
+	end)
 end
 
 BUILDERS.Upgrades = function(profile)
-	local order = 0
-	for _, category in ipairs({ "Throw", "Prep" }) do
-		order += 1
-		header(order, if category == "Throw" then "Throwing upgrades" else "Preparation upgrades")
-		for _, id in ipairs(Config.UpgradeOrder) do
-			local def = Config.Upgrades[id]
-			if def.Category == category then
-				order += 1
-				local r = row(order)
-				local level = Economy.upgradeLevel(profile, id)
-				local value = Economy.upgradeValue(Config, profile, id)
-				Ui.label({
-					Text = string.format("%s — Lv %d/%d", def.Name, level, #def.Levels),
-					FontFace = Ui.TitleFont,
-					TextSize = 20,
-					LayoutOrder = 1,
-					Parent = r,
-				})
-				Ui.label({
-					Text = def.Description .. "  Now: " .. string.format(def.Format, value),
-					TextSize = 16,
-					TextColor3 = C.Muted,
-					LayoutOrder = 2,
-					Parent = r,
-				})
-				local cost = Economy.nextUpgradeCost(Config, profile, id)
-				if cost then
-					local nextValue = def.Levels[level + 1].Value
-					local affordable = Economy.canAfford(profile, cost)
-					actionButton(
-						r,
-						"Upgrade_" .. id,
-						string.format(
-							"Upgrade to %s — %s%s",
-							string.format(def.Format, nextValue),
-							costString(cost),
-							if affordable then "" else " (locked)"
-						),
-						affordable,
-						3,
-						function()
-							purchase("Upgrade_" .. id, "BuyUpgrade", id, level)
-						end
+	header(0, "Upgrades — every effect is applied by the server")
+	pagedList("Upgrades", Config.AllUpgradeOrder, Config.Upgrades, Config.UpgradeCategoryOrder, function(id)
+		return Config.Upgrades[id].Category
+	end, function(r, id)
+		local def = Config.Upgrades[id]
+		local level = Economy.upgradeLevel(profile, id)
+		local value = Economy.upgradeValue(Config, profile, id)
+		Ui.label({
+			Text = string.format("%s — Lv %d/%d · %s", def.Name, level, #def.Levels, def.Category),
+			FontFace = Ui.TitleFont,
+			TextSize = 20,
+			LayoutOrder = 1,
+			Parent = r,
+		})
+		Ui.label({
+			Text = def.Description .. "  Now: " .. string.format(def.Format, value),
+			TextSize = 16,
+			TextColor3 = C.Muted,
+			LayoutOrder = 2,
+			Parent = r,
+		})
+		local cost = Economy.nextUpgradeCost(Config, profile, id)
+		if cost then
+			local unlocked, reason = Economy.upgradeUnlocked(Config, profile, id)
+			local nextValue = def.Levels[level + 1].Value
+			local affordable = unlocked and Economy.canAfford(profile, cost)
+			actionButton(
+				r,
+				"Upgrade_" .. id,
+				if unlocked
+					then string.format(
+						"Upgrade to %s — %s%s",
+						string.format(def.Format, nextValue),
+						costString(cost),
+						if affordable then "" else " (locked)"
 					)
-				else
-					Ui.label({ Text = "★ Fully upgraded!", TextSize = 16, LayoutOrder = 3, Parent = r })
+					else "🔒 " .. reason,
+				affordable,
+				3,
+				function()
+					purchase("Upgrade_" .. id, "BuyUpgrade", id, level)
 				end
-			end
+			)
+		else
+			Ui.label({ Text = "★ Fully upgraded!", TextSize = 16, LayoutOrder = 3, Parent = r })
 		end
-	end
+	end)
 end
 
 BUILDERS.Map = function(profile)
@@ -676,21 +745,49 @@ end
 
 BUILDERS.Journal = function(profile)
 	local found, total = Economy.discoveryCount(Config, profile)
-	header(0, string.format("Journal — %d/%d food discoveries", found, total))
-	for i, speciesId in ipairs(Config.SpeciesOrder) do
+	local s = profile.stats
+	header(
+		0,
+		string.format(
+			"Journal — %d/%d food discoveries · %d/%d visitor favourites",
+			found,
+			total,
+			Economy.visitorFavoritesFound(Config, profile),
+			#Config.VisitorOrder
+		)
+	)
+	Ui.label({
+		Text = string.format(
+			"Meals served: %s · Perfect catches: %s · Feasts joined: %s (completed %s) · Coins earned: %s · Visitors called: %s",
+			Ui.formatNumber(s.totalFeeds),
+			Ui.formatNumber(s.perfectCatches),
+			Ui.formatNumber(s.feastsJoined),
+			Ui.formatNumber(s.feastsCompleted),
+			Ui.formatNumber(s.coinsEarned),
+			Ui.formatNumber(s.luresUsed or 0)
+		),
+		TextSize = 16,
+		LayoutOrder = 0,
+		Parent = panelContent,
+	})
+	pagedList("Journal", Config.AllSpeciesOrder, Config.Species, Config.HabitatOrder, function(id)
+		return Config.Species[id].Habitat
+	end, function(r, speciesId)
 		local species = Config.Species[speciesId]
-		local r = row(i)
 		local seen = profile.seenSpecies[speciesId] or (profile.fedCount[speciesId] or 0) > 0
+		local where = Config.Habitats[species.Habitat].Name
 		if not seen then
 			Ui.label({
-				Text = "??? — spotted in " .. Config.Habitats[species.Habitat].Name,
+				Text = (if species.Visitor then "??? (visitor) — " else "??? — ") .. "spotted in " .. where,
 				FontFace = Ui.TitleFont,
 				TextSize = 20,
 				LayoutOrder = 1,
 				Parent = r,
 			})
 			Ui.label({
-				Text = "Get close to this animal to add it to your journal.",
+				Text = if species.Visitor
+					then "Visitors come and go. Cook its lure in the Kitchen to call one. " .. species.Hint
+					else "Get close to this animal to add it to your journal.",
 				TextSize = 16,
 				TextColor3 = C.Muted,
 				LayoutOrder = 2,
@@ -717,7 +814,14 @@ BUILDERS.Journal = function(profile)
 			local parts = {}
 			local discoveries = profile.discoveries[speciesId] or {}
 			local favoriteFound = false
-			for _, foodId in ipairs(Config.FoodOrder) do
+			local foods = if species.Visitor then {} else table.clone(Config.FoodOrder)
+			if species.Visitor then
+				for foodId in pairs(species.Preferences) do
+					table.insert(foods, foodId)
+				end
+				table.sort(foods)
+			end
+			for _, foodId in ipairs(foods) do
 				local food = Config.Foods[foodId]
 				if discoveries[foodId] then
 					local pref = Economy.preference(Config, speciesId, foodId)
@@ -725,7 +829,7 @@ BUILDERS.Journal = function(profile)
 					favoriteFound = favoriteFound or pref == "favorite"
 					table.insert(parts, string.format("%s %s: %s %s", food.Icon, food.Name, def.Icon, def.Label))
 				else
-					table.insert(parts, string.format("%s %s: ?", food.Icon, food.Name))
+					table.insert(parts, if species.Visitor then "? ???" else string.format("%s %s: ?", food.Icon, food.Name))
 				end
 			end
 			Ui.label({ Text = table.concat(parts, "   "), TextSize = 16, LayoutOrder = 3, Parent = r })
@@ -733,22 +837,21 @@ BUILDERS.Journal = function(profile)
 				Ui.label({ Text = "Hint: " .. species.Hint, TextSize = 16, TextColor3 = C.Muted, LayoutOrder = 4, Parent = r })
 			end
 		end
-	end
-	local s = profile.stats
-	local r = row(20)
-	Ui.label({
-		Text = string.format(
-			"Meals served: %s · Perfect catches: %s · Feasts joined: %s (completed %s) · Coins earned: %s",
-			Ui.formatNumber(s.totalFeeds),
-			Ui.formatNumber(s.perfectCatches),
-			Ui.formatNumber(s.feastsJoined),
-			Ui.formatNumber(s.feastsCompleted),
-			Ui.formatNumber(s.coinsEarned)
-		),
-		TextSize = 16,
-		LayoutOrder = 1,
-		Parent = r,
-	})
+		local lures = profile.lures[speciesId] or 0
+		if species.Visitor and lures > 0 then
+			actionButton(
+				r,
+				"Lure_" .. speciesId,
+				string.format("Call a %s to %s (%d lure%s)", species.Name, where, lures, if lures == 1 then "" else "s"),
+				profile.unlockedHabitats[species.Habitat] == true,
+				5,
+				function()
+					pending["Lure_" .. speciesId] = os.clock()
+					send("UseLure", { id = speciesId })
+				end
+			)
+		end
+	end)
 end
 
 BUILDERS.Settings = function(profile)
@@ -801,6 +904,10 @@ local function rebuildPanel(force: boolean?)
 		end
 	end
 	panelTitle.Text = TAB_ICONS[currentTab] .. "  " .. currentTab
+	searchBox.Visible = SEARCH_TABS[currentTab] == true
+	if searchBox.Text ~= (searchQuery[currentTab] or "") then
+		searchBox.Text = searchQuery[currentTab] or "" -- this tab's own query (fires a no-op change)
+	end
 	for name, button in pairs(tabButtons) do
 		button.BackgroundColor3 = if name == currentTab then C.PanelDark else C.Primary
 		button.Text = (if name == currentTab then "▶ " else "") .. name
@@ -847,64 +954,111 @@ end
 --------------------------------------------------------------------------------
 
 local foodBarKey = ""
+local foodBarPage = 1
+local barSelected: string? = nil
+local FOOD_BUTTONS_WHEN_PAGED = 5 -- leaves room for the two page arrows inside the 780-wide bar
 local function rebuildFoodBar(profile: any)
+	local all = Economy.barFoods(Config, profile)
+	local slots = if #all > Config.FoodBar.Slots then FOOD_BUTTONS_WHEN_PAGED else Config.FoodBar.Slots
+	local pages = math.max(1, math.ceil(#all / slots))
+	foodBarPage = math.clamp(foodBarPage, 1, pages)
+	-- Keep the selected food visible when it changes (keyboard/gamepad cycling, Pantry select).
+	local selectedIndex = table.find(all, profile.selectedFood)
 	local key = table.concat({
 		Store.inputMode,
 		tostring(profile.selectedFood),
-		fingerprint(profile.unlockedFoods),
+		table.concat(all, ","),
 		fingerprint(profile.inventory),
+		tostring(foodBarPage),
 	}, "|")
 	if key == foodBarKey then
 		return -- coins or trust changed, not the food bar: keep its buttons (and any tap) intact
 	end
-	foodBarKey = key
+	if selectedIndex and profile.selectedFood ~= barSelected then
+		foodBarPage = math.ceil(selectedIndex / slots)
+	end
+	barSelected = profile.selectedFood
+	foodBarKey = table.concat({
+		Store.inputMode,
+		tostring(profile.selectedFood),
+		table.concat(all, ","),
+		fingerprint(profile.inventory),
+		tostring(foodBarPage),
+	}, "|")
 	for _, child in ipairs(foodBar:GetChildren()) do
 		if child:IsA("TextButton") then
 			child:Destroy()
 		end
 	end
-	for i, foodId in ipairs(Config.FoodOrder) do
-		if profile.unlockedFoods[foodId] then
-			local food = Config.Foods[foodId]
-			local selected = profile.selectedFood == foodId
-			local count = if food.Free then "∞" else tostring(profile.inventory[foodId] or 0)
-			local keyHint = if Store.inputMode == "keyboard" then string.format("[%d] ", i) else ""
-			local button = Ui.button({
-				Name = "Food_" .. foodId,
-				Size = UDim2.fromOffset(104, 76),
-				BackgroundColor3 = Color3.fromRGB(food.Color[1], food.Color[2], food.Color[3]):Lerp(C.PanelDark, 0.35),
-				Text = string.format("%s%s %s\n%s", keyHint, food.Icon, food.Name, count),
-				TextSize = 17,
-				LayoutOrder = i,
-				Parent = foodBar,
+	local visible = {}
+	for i = (foodBarPage - 1) * slots + 1, math.min(#all, foodBarPage * slots) do
+		table.insert(visible, all[i])
+	end
+	Store.barFoods = visible
+	Store.allBarFoods = all
+	local function pageButton(name: string, text: string, order: number, step: number)
+		local button = Ui.button({
+			Name = name,
+			Size = UDim2.fromOffset(50, 76),
+			Text = text,
+			TextSize = 20,
+			LayoutOrder = order,
+			BackgroundColor3 = C.PanelDark,
+			Parent = foodBar,
+		}, pages > 1)
+		button.Activated:Connect(function()
+			foodBarPage = (foodBarPage - 1 + step) % pages + 1
+			rebuildFoodBar(Store.profile)
+		end)
+	end
+	if pages > 1 then
+		pageButton("FoodPrev", "◀", 0, -1)
+	end
+	for i, foodId in ipairs(visible) do
+		local food = Config.Foods[foodId]
+		local selected = profile.selectedFood == foodId
+		local count = if food.Free then "∞" else tostring(profile.inventory[foodId] or 0)
+		local keyHint = if Store.inputMode == "keyboard" then string.format("[%d] ", i) else ""
+		local pin = if table.find(profile.pinned or {}, foodId) then "📌" else ""
+		local button = Ui.button({
+			Name = "Food_" .. foodId,
+			Size = UDim2.fromOffset(104, 76),
+			BackgroundColor3 = Color3.fromRGB(food.Color[1], food.Color[2], food.Color[3]):Lerp(C.PanelDark, 0.35),
+			Text = string.format("%s%s %s%s\n%s", keyHint, food.Icon, food.Name, pin, count),
+			TextSize = 17,
+			TextWrapped = true,
+			LayoutOrder = i,
+			Parent = foodBar,
+		})
+		local stroke = button:FindFirstChildOfClass("UIStroke") :: UIStroke
+		if selected then
+			-- Selected = thick white outline + ▲ marker (not colour alone).
+			stroke.Color = C.White
+			stroke.Thickness = 4
+			stroke.Transparency = 0
+			Ui.new("TextLabel", {
+				Text = "▲ selected",
+				Size = UDim2.new(1, 0, 0, 18),
+				Position = UDim2.new(0, 0, 1, 2),
+				BackgroundTransparency = 1,
+				TextColor3 = C.White,
+				TextStrokeTransparency = 0.2,
+				FontFace = Ui.BoldFont,
+				TextSize = 14,
+				Parent = button,
 			})
-			local stroke = button:FindFirstChildOfClass("UIStroke") :: UIStroke
-			if selected then
-				-- Selected = thick white outline + ▲ marker (not colour alone).
-				stroke.Color = C.White
-				stroke.Thickness = 4
-				stroke.Transparency = 0
-				Ui.new("TextLabel", {
-					Text = "▲ selected",
-					Size = UDim2.new(1, 0, 0, 18),
-					Position = UDim2.new(0, 0, 1, 2),
-					BackgroundTransparency = 1,
-					TextColor3 = C.White,
-					TextStrokeTransparency = 0.2,
-					FontFace = Ui.BoldFont,
-					TextSize = 14,
-					Parent = button,
-				})
-			end
-			button.Activated:Connect(function()
-				Store.emit("selectFood", foodId)
-			end)
 		end
+		button.Activated:Connect(function()
+			Store.emit("selectFood", foodId)
+		end)
+	end
+	if pages > 1 then
+		pageButton("FoodNext", "▶", 98, 1)
 	end
 	local plus = Ui.button({
 		Name = "Food_more",
 		Size = UDim2.fromOffset(76, 76),
-		Text = "+\nPantry",
+		Text = if pages > 1 then string.format("+\nPantry\n%d/%d", foodBarPage, pages) else "+\nPantry",
 		TextSize = 16,
 		LayoutOrder = 99,
 		BackgroundColor3 = C.PanelDark,
@@ -1301,9 +1455,33 @@ function Hud.init()
 		end)
 		tabButtons[tab] = button
 	end
+	-- Catalog search. It lives outside panelContent, so the rebuilds it triggers never destroy it
+	-- (typing keeps focus) and the panel's own refreshes never overwrite what is being typed.
+	searchBox = Ui.new("TextBox", {
+		Name = "SearchBox",
+		Position = UDim2.fromOffset(0, 120),
+		Size = UDim2.new(1, -8, 0, 40),
+		BackgroundColor3 = C.White,
+		PlaceholderText = "🔍 Search names and descriptions…",
+		Text = "",
+		ClearTextOnFocus = false,
+		TextColor3 = C.Ink,
+		FontFace = Ui.BodyFont,
+		TextSize = 18,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = panel,
+	}, { Ui.corner(10), Ui.padding(6), Ui.stroke(C.PanelDark, 2) })
+	searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+		local text = string.sub(searchBox.Text, 1, 40)
+		if (searchQuery[currentTab] or "") ~= text then
+			searchQuery[currentTab] = text
+			listPage[currentTab] = 1
+			rebuildPanel(true)
+		end
+	end)
 	panelContent = Ui.new("ScrollingFrame", {
-		Position = UDim2.fromOffset(0, 122),
-		Size = UDim2.new(1, 0, 1, -122),
+		Position = UDim2.fromOffset(0, 166),
+		Size = UDim2.new(1, 0, 1, -166),
 		BackgroundTransparency = 1,
 		CanvasSize = UDim2.new(),
 		AutomaticCanvasSize = Enum.AutomaticSize.Y,

@@ -609,6 +609,23 @@ function Economy.quickFoods(config: any, profile: any): { string }
 	return list
 end
 
+-- Every food the bar can page through: the quick bar first (free, selected, pinned, core), then
+-- every other food the player has in stock, in catalog order. Bounded by the food catalog.
+function Economy.barFoods(config: any, profile: any): { string }
+	local list = Economy.quickFoods(config, profile)
+	local seen: { [string]: boolean } = {}
+	for _, id in ipairs(list) do
+		seen[id] = true
+	end
+	for _, id in ipairs(config.AllFoodOrder or config.FoodOrder) do
+		if not seen[id] and profile.unlockedFoods[id] and Economy.hasFood(config, profile, id) then
+			seen[id] = true
+			table.insert(list, id)
+		end
+	end
+	return list
+end
+
 function Economy.tryTogglePin(config: any, profile: any, foodId: string): (boolean, string)
 	local food = config.Foods[foodId]
 	if not food or food.Free then

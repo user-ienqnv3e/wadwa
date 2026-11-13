@@ -16,6 +16,7 @@ local FeedingService = require(Services.FeedingService)
 local FeastService = require(Services.FeastService)
 local ActionService = require(Services.ActionService)
 local SafetyService = require(Services.SafetyService)
+local DecorService = require(Services.DecorService)
 
 -- The world is baked into the place file; rebuild it only if it is missing (e.g. `rojo serve`).
 local world = workspace:FindFirstChild(Config.World.FolderName)
@@ -43,6 +44,11 @@ FeedingService.init({
 	notify = notify,
 	feast = { mouthPosition = FeastService.mouthPosition, contribute = FeastService.contribute },
 }, world)
+DecorService.init({ getProfile = getProfile, notify = notify }, function(callback)
+	DataService.onLoaded(function(player)
+		callback(player)
+	end)
+end)
 ActionService.init({
 	getProfile = getProfile,
 	markDirty = markDirty,
@@ -50,6 +56,7 @@ ActionService.init({
 	ringBell = FeastService.ringFromPlayer,
 	summon = AnimalService.summon,
 	resync = StateService.requestFull,
+	decorChanged = DecorService.sync,
 })
 SafetyService.init({ getProfile = getProfile, notify = notify })
 

@@ -43,6 +43,10 @@ local function installShims()
 	roblox.implementProperty("PlayerGui", "ChildAdded", function(self)
 		return instanceSignal(self, "ChildAdded")
 	end)
+	-- TextBox text edits: tests call client:type(box, text), which sets Text and fires this.
+	roblox.implementMethod("TextBox", "GetPropertyChangedSignal", function(self, prop)
+		return instanceSignal(self, "Changed:" .. prop)
+	end)
 	roblox.implementMethod("Camera", "GetPropertyChangedSignal", function(self, prop)
 		return instanceSignal(self, "Changed:" .. prop)
 	end)
@@ -359,6 +363,13 @@ function Client:hud()
 end
 
 -- Finds a descendant GuiObject of the HUD by name.
+-- Types into a TextBox the way Roblox reports it: the Text property changes and its changed signal
+-- fires (once per call; real typing fires per keystroke, which tests can mimic with several calls).
+function Client:type(box, text)
+	box.Text = text
+	instanceSignal(box, "Changed:Text"):Fire()
+end
+
 function Client:find(name)
 	local hud = self:hud()
 	return hud and hud:FindFirstChild(name, true)
