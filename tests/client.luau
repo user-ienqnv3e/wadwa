@@ -738,6 +738,71 @@ test("stale or duplicate snapshots never roll the mirror back", function()
 	noFailures(engine)
 end)
 
+test("bar & search edges: unpin selected, last item falls back, wrap paging, long/pattern queries, respawn", function()
+	local engine, player, client = session()
+	local profile = richProfile(engine, player)
+	for _, id in ipairs({ "mango", "dewberry_jam", "acorn", "truffle", "papaya", "lime", "coconut" }) do
+		profile.unlockedFoods[id] = true
+		profile.inventory[id] = 5
+	end
+	profile.pinned = { "mango" }
+	profile.selectedFood = "mango"
+	profile.inventory.mango = 1
+	pushState(engine, player)
+	local Store = client:controller("Store")
+	local Hud = client:controller("Hud")
+	truthy(table.find(Store.barFoods, "mango"), "selected pinned food visible")
+	-- Unpinning the selected food keeps it selected and on the bar.
+	client:send("Action", table.pack({ kind = "PinFood", id = "mango" }))
+	engine:advance(0.6)
+	eq(#serverProfile(engine, player).pinned, 0, "unpinned")
+	truthy(table.find(Store.barFoods, "mango"), "still shown while selected")
+	-- Throwing the last one falls back to the free food, and the bar shows it.
+	client:keyDown(Enum.KeyCode.F)
+	engine:advance(0.5)
+	client:keyUp(Enum.KeyCode.F)
+	engine:advance(1.5)
+	eq(serverProfile(engine, player).selectedFood, "sunberry", "fallback to the free food")
+	eq(Store.profile.selectedFood, "sunberry", "mirror follows")
+	truthy(table.find(Store.barFoods, "sunberry"), "free food visible")
+	-- Paging wraps both ways.
+	local pagesSeen = {}
+	for _ = 1, 6 do
+		pagesSeen[table.concat(Store.barFoods, ",")] = true
+		client:click(client:find("FoodPrev"))
+		engine:advance(0.1)
+	end
+	local n = 0
+	for _ in pairs(pagesSeen) do
+		n += 1
+	end
+	truthy(n >= 2, "prev wraps through the pages")
+	-- Long query with Lua pattern characters: no error, clamped, empty result shown.
+	Hud.openPanel("Kitchen")
+	engine:advance(0.2)
+	local box = client:find("SearchBox")
+	client:type(box, string.rep("%[(.*", 60))
+	engine:advance(0.2)
+	truthy(#box.Text <= 40, "query clamped to 40 characters (got " .. #box.Text .. ")")
+	truthy(client:find("NoResults"), "empty result")
+	-- A tab without search hides the box; coming back restores that tab's query.
+	Hud.openPanel("Map")
+	engine:advance(0.2)
+	eq(box.Visible, false, "no search on Map")
+	Hud.openPanel("Kitchen")
+	engine:advance(0.2)
+	eq(box.Visible, true)
+	truthy(#box.Text > 0, "kitchen query kept")
+	client:type(box, "")
+	engine:advance(0.2)
+	truthy(not client:find("NoResults"), "clearing shows everything again")
+	-- Respawning keeps the bar and the panel state working.
+	engine:spawnCharacter(player)
+	engine:advance(1)
+	truthy(#Store.barFoods >= 1 and client:find("Food_sunberry"), "bar survives respawn")
+	noFailures(engine)
+end)
+
 print(string.format("\n%d passed, %d failed", passed, failed))
 if failed > 0 then
 	process.exit(1)

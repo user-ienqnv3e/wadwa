@@ -437,7 +437,10 @@ local function runSeed(seed)
 end
 
 local seeds = table.clone(REGRESSION_SEEDS)
-local base = os.time()
+-- Extra seeds derive from a base (default: the clock). It is printed so any failing batch can be
+-- replayed exactly: lune run tests/fuzz.luau <place> <extra> <steps> <base>
+local base = tonumber(process.args[4]) or os.time()
+print(string.format("  (extra seed base %d)", base))
 for i = 1, EXTRA do
 	table.insert(seeds, (base * 7919 + i * 104729) % 2147483646)
 end
